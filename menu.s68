@@ -91,7 +91,7 @@
 	dc.b "                "
 	dc.b "                "
 	dc.b "                "
-	dc.b "JUE "
+	dc.b "JU  "
 
 ;register addresses
 VDP_DATA  equ $C00000
@@ -144,7 +144,11 @@ vdpreg macro
 ;\1 - VDP address
 ;\2 - Access type
 vdpaccess macro
+	ifeq NARG-2
 	move.l #((\2) | (\1) << 16 & $3FFF0000 | (\1) >> 14 & 3), (a1)
+	else
+	move.l #((\2) | (\1) << 16 & $3FFF0000 | (\1) >> 14 & 3), \3
+	endif
 	endm
 
 ;Writes a DMA command to the control port
@@ -165,26 +169,38 @@ dmasrc macro
 
 dir_buffer equ $100000
 menu_port  equ $180000
+load_rom_port equ (menu_port+2*4)
+lock_on_port equ (menu_port+8*4)
 
 MAX_DISPLAY equ 24
 
 	rsset $FFFF8000
-x_pos         rs.w 1
-base_cmd      rs.l 1
-sprite_list   rs.l 160
-page_index    rs.l MAX_DISPLAY+1
-page_stack    rs.l 1
-page_pointers rs.l 1024
-mouse_sprite  rs.l 1
-mouse_x       rs.w 1
-num_sprites   rs.b 1
-last_pad1     rs.b 1
-last_pad2     rs.b 1
-selected      rs.b 1
-more_pages    rs.b 1
-mouse_buf     rs.b 3
-mouse_shown   rs.b 1
-last_mbuttons rs.b 1
+x_pos           rs.w 1
+base_cmd        rs.l 1
+sprite_list     rs.l 160
+page_index      rs.l MAX_DISPLAY+1
+page_stack      rs.l 1
+page_pointers   rs.l 1024
+mouse_sprite    rs.l 1
+menu_functions  rs.l 1
+cursor_show_fun rs.l 1
+special_click   rs.l 1
+rom_load_addr   rs.l 1
+mouse_x         rs.w 1
+selection_top   rs.w 1
+selection_bot   rs.w 1
+selection_mask  rs.w 1
+num_sprites     rs.b 1
+last_pad1       rs.b 1
+last_pad2       rs.b 1
+selected        rs.b 1
+more_pages      rs.b 1
+mouse_buf       rs.b 3
+mouse_shown     rs.b 1
+last_mbuttons   rs.b 1
+num_menu        rs.b 1
+num_slots       rs.b 1
+port_off        rs.b 1
 
 
 int_6:
@@ -201,6 +217,10 @@ int_6:
 	move.b d1, d0
 	move.l d0, (a1)
 	startdma $C000, VDP_VRAM_WRITE
+	
+	move.w (menu_port+4*7), d0
+	btst #0, d0
+	bne show_pause_menu
 
 	;read gamepad/mouse in port 1
 	lea PAD1_DATA, a2
@@ -245,37 +265,65 @@ pad2:
 ;d0 = SACBRLUD
 ;d1 = newly pressed buttons
 handle_pad_buttons:
+	tst.b num_menu.w
+	bne handle_buttons_menu
+	tst.b num_slots.w
+	bne handle_buttons_save
 	moveq #16, d2
-	btst #1, d1
-	bne down
-	btst #0, d1
-	bne up
+
+
 	btst #3, d1
 	bne right
 	btst #2, d1
 	bne left
+buttons_no_leftright
+	btst #1, d1
+	bne down
+	btst #0, d1
+	bne up
 	btst #7, d1
 	bne select_entry
 	btst #5, d1
 	bne select_entry
 handle_done:
 	rts
+handle_buttons_menu
+	moveq #48, d2
+	bra buttons_no_leftright
+handle_buttons_save
+	moveq #32, d2
+	bra buttons_no_leftright
 
 down:
+	
 	;check if we are already at the bottom of the page
 	moveq #1, d0
 	add.b (selected).w, d0
+	tst.b num_menu.w
+	bne .menu
+	tst.b num_slots.w
+	bne .slots
 	move.w d0, d1
-	add.w d0, d0
-	add.w d0, d0
+	add.w d1, d1
+	add.w d1, d1
 	lea page_index.w, a2
-	tst.l (0, a2, d0.w)
+	tst.l (0, a2, d1.w)
 	beq handle_done
-	move.b d1, (selected).w
+.do_move
+	move.b d0, (selected).w
 
 	add.w d2, (sprite_list).w
 	add.w d2, (sprite_list+8).w
 	rts
+.menu:
+	cmp.b num_menu.w, d0
+	beq handle_done
+	bra .do_move
+.slots:
+	cmp.b num_slots.w, d0
+	beq handle_done
+	bra .do_move
+	
 up:
 	;check if we are already at the top of the page
 	move.b (selected).w, d0
@@ -316,14 +364,35 @@ select_entry:
 	move.b (selected).w, d0
 	add.w d0, d0
 	add.w d0, d0
+	tst.b num_menu.w
+	bne .select_menu_button
+	tst.b num_slots.w
+	bne .select_save_slot
 	lea page_index.w, a2
 	move.l (0, a2, d0.w), a2
 	tst.b (-1, a2)
 	bne enter_dir
 	;regular file
-	lea menu_port+8, a3
+	move.l rom_load_addr.w, a3
 	move.l a2, (a3)
-	rts
+	
+	addq #6, a7
+	bra show_pause_menu
+.select_menu_button:
+	movea.l menu_functions.w, a2
+	move.l (0, a2, d0.w), a2
+	addq #6, a7
+	jmp (a2)
+.select_save_slot:
+	lea menu_port, a3
+	moveq #0, d0
+	move.b port_off.w, d0
+	add.w d0, a3
+	move.b selected.w, d0
+	move.l d0, (a3)
+	addq #6, a7
+	jmp show_pause_menu
+	
 enter_dir:
 	lea menu_port+4, a3
 	move.l a2, (a3)
@@ -355,13 +424,19 @@ handle_mouse:
 	move.b d2, (-5, a2, d4.w)
 	lea (0, a2, d4.w), a2
 	move.l a2, mouse_sprite.w
-	move.l #$01000500, (a2)+
+	move.l #$00EA0500, (a2)+
 	move.w #$8083, (a2)
 	move.w #$100, mouse_x.w
 	addq #1, d2
 	move.b d2, num_sprites.w
 
 	move.b #1, mouse_shown.w
+	
+	move.l cursor_show_fun.w, d2
+	beq .skip_show_check
+	move.l d2, a2
+	jsr (a2)
+	
 
 .skip_show_check
 	neg.w d1
@@ -372,10 +447,14 @@ handle_mouse:
 	asr.w #1, d0
 	move.w d0, (6, a2)
 	move.w (a2), d1
-	cmp.w #272, d1
+	cmp.w selection_top.w, d1
 	blo .done
-	cmp.w #655, d1
-	bhi .done
+	cmp.w selection_bot.w, d1
+	bhi .special_click
+	tst.b num_menu.w
+	bne .handle_menu
+	tst.b num_slots.w
+	bne .handle_slots
 	and.w #$FFF0, d1
 	subq #8, d1
 	move.w d1, (sprite_list).w
@@ -384,11 +463,64 @@ handle_mouse:
 	sub.w #264, d1
 	lsr.w #4, d1
 	move.b d1, selected.w
-.no_mouse_move
+	bra .normal_click
+.handle_menu
+	;TODO: FIXME
+	and.w #$FFF0, d1
+	moveq #0, d0
+	move.w d1, d0
+	sub.w selection_top.w, d0
+	divu.w #48, d0
+	swap d0
+	tst.w d0
+	beq .no_adjust
+	
+	cmp.w #16, d0
+	bne .round_up
+	swap d0
+	sub.w #16, d1
+	bra .set_cursor_pos
+	
+.round_up
+	swap d0
+	addq #1, d0
+	add.w #16, d1
+	bra .set_cursor_pos
+	
+.no_adjust
+	swap d0
+.set_cursor_pos
+	move.w d1, (sprite_list).w
+	move.w d1, (sprite_list+8).w
+
+	move.b d0, selected.w
+	
+	bra .normal_click
+.handle_slots
+	and.w #$FFE0, d1
+	subq #8, d1
+	move.w d1, (sprite_list).w
+	move.w d1, (sprite_list+8).w
+
+	sub.w #264, d1
+	lsr.w #5, d1
+	move.b d1, selected.w
+.normal_click
 	btst #0, d4
 	bne select_entry
 .done
 	rts
+.no_mouse_move
+	tst.b mouse_shown
+	bne .skip_show_check
+	rts
+.special_click:
+	btst #0, d4
+	beq .done
+	move.l special_click.w, d2
+	beq .done
+	move.l d2, a2
+	jmp (a2)
 int_4:
 empty_handler:
 	rte
@@ -516,7 +648,168 @@ ypos
 	move.b #$40, (PAD1_CTRL-PAD1_DATA, a2)
 	rts
 
+topcorner equ (button-font)/64 + 32
+topmiddle equ topcorner+1
+botcorner equ topmiddle+1
+botmiddle equ botcorner+1
+horiz_flip equ $800
+vert_flip equ $1000
 
+; draws a button
+; d0.w - x in cells
+; d1.w - y in cells
+; d2.w - width in cells
+;
+; clobbers a6
+draw_button:
+	;multiply x by 2
+	add.w d0, d0
+	;multiply y by 128
+	lsl.w #7, d1
+	add.w d1, d0
+	add.w #$A000, d0
+	move.w d0, d1
+	and.w #$3FFF, d0
+	rol.w #2, d1
+	and.w #3, d1
+	ori.w #(VDP_VRAM_WRITE >> 16), d0
+	swap d0
+	move.w d1, d0
+	move.l d0, (a1)
+	move.w d2, d1
+	;top left corner
+	move.w #topcorner, (a0)
+	subq #3, d1
+	bmi .notopmiddle
+.toploop:
+	;top middle
+	move.w #topmiddle, (a0)
+	dbra d1, .toploop
+.notopmiddle
+	;top right corner
+	move.w #(topcorner | horiz_flip), (a0)
+	;go to next row in name table
+	add.l #((2*64) << 16), d0
+	move.l d0, (a1)
+	;bottom left corner
+	move.w #botcorner, (a0)
+	subq #3, d2
+	bmi .nomiddlebot
+.botloop:
+	;bottom middle
+	move.w #botmiddle, (a0)
+	dbra d2, .botloop
+.nomiddlebot
+	;bottom right corner
+	move.w #(botcorner | horiz_flip), (a0)
+	rts
+
+;a5 - menu pointer
+;d6 - initial Y position of menu
+draw_menu:
+	moveq #0, d7
+	moveq #0, d5
+	;clear out save slot state
+	move.b d5, num_slots.w
+	;clear out event handlers
+	move.l d5, cursor_show_fun.w
+	move.l d5, special_click.w
+	;select first item
+	move.b d7, selected.w
+	;save menu pointer for second pass
+	movea.l a5, a4
+	;adjust arrow mask
+	move.w #$FFE0, selection_mask.w
+.lenloop	
+	tst.b (a5)
+	beq .lendone
+	addq #1, d5
+	movea.l a5, a6
+	bsr strlen
+	cmp.w d7, d0
+	blo .nochange
+	move.w d0, d7
+.nochange
+	lea (1, a5, d0.w), a5
+	bra .lenloop
+.lendone
+	
+	addq #2, d7
+	move.b d5, num_menu.w
+	
+	;calculate X position
+	move.w d7, d4
+	lsr.w #1, d4
+	moveq #20, d5
+	sub.w d4, d5
+	;calculate left arrow X
+	move.w d5, d4
+	lsl.w #3, d4
+	add.w #(128-24), d4
+	move.w d4, (sprite_list+6).w
+	;calculate right arrow x
+	move.w d7, d3
+	lsl.w #3, d3
+	add.w d3, d4
+	add.w #32, d4
+	move.w d4, (sprite_list+6+8).w
+	;update left arrow Y
+	move.w d6, d4
+	lsl.w #4, d4
+	add.w #256, d4
+	move.w d4, (sprite_list).w
+	move.w d4, (sprite_list+8).w
+	;update mouse top limit
+	move.w d4, selection_top.w
+	;restore menu pointer
+	movea.l a4, a5
+.drawloop
+	tst.b (a5)
+	beq .done
+	;x pos
+	move.w d5, d0
+	;y pos
+	move.w d6, d1
+	;width
+	move.w d7, d2
+	bsr draw_button
+	
+	movea.l a5, a6
+	bsr strlen
+	movea.l a5, a6
+	lea (1, a5, d0.w), a5
+	;x pos
+	move.w d7, d1
+	lsr.w #1, d1
+	add.w d5, d1
+	lsr.w #1, d0
+	sub.w d0, d1
+	;y pos
+	move.w d6, d2
+	;base attribute
+	move.w #$206B, d0
+	bsr print_string_fixed
+	
+	addq #3, d6
+	bra .drawloop
+.done
+	;update mouse bottom limit
+	lsl.w #4, d6
+	add.w #224, d6
+	move.w d6, selection_bot.w
+	rts
+	
+clear_screen:
+	;clear name tables
+	vdpaccess $8000, VDP_VRAM_WRITE
+	moveq #32, d0
+	swap d0
+	move.b #32, d0
+	move.w #(64*64-1), d1
+ploop:
+	move.l d0, (a0)
+	dbra d1, ploop
+	rts
 
 initial_regs:
 	vdpreg MODE_2, $4    ;Mode 5, everything turned off
@@ -552,22 +845,29 @@ start:
 	dbra d0, .regloop
 
 	vdpaccess $0, VDP_CRAM_WRITE
-	move.w #$020, (a0)
+	move.w #$400, (a0)
 	move.w #$EEE, (a0)
 	move.w #$222, (a0)
 
 	;init scroll table
 	vdpaccess $0, VDP_VRAM_WRITE
 	move.w #0, (a0)
-	move.w #4, (a0)
-
+	move.w #0, (a0)
+	
+	
 	;load tiles
 	vdpaccess $800, VDP_VRAM_WRITE
 	lea font(pc), a2
-	move.w #((cursorend-font)/4 - 1), d0
+	move.w #((buttonend-font)/4 - 1), d0
 tloop:
 	move.l (a2)+, (a0)
 	dbra d0, tloop
+	move.w #((fontfixedend-fontfixed)/4 - 1), d0
+dtloop:
+	move.l (a2)+, d1
+	move.l d1, (a0)
+	move.l d1, (a0)
+	dbra d0, dtloop
 
 
 	;setup SAT
@@ -582,8 +882,57 @@ tloop:
 	move.l #$01080500, (a2)+
 	move.l #$887F01AA, (a2)+
 	move.b #2, num_sprites.w
-
+	
+show_main_menu:
+	bsr clear_screen
+	;init vertical scroll RAM
+	vdpaccess $0, VDP_VSRAM_WRITE
+	move.w #-4, (a0)
+	move.w #0, (a0)
+	
+	moveq #8, d6
+	move.l #main_menu_func, menu_functions.w
+	lea main_menu(pc), a5
+	bsr draw_menu
+	bra gamepad_setup
+	
+show_pause_menu:
+	bsr clear_screen
+	;init vertical scroll RAM
+	vdpaccess $0, VDP_VSRAM_WRITE
+	move.w #-4, (a0)
+	move.w #0, (a0)
+	moveq #8, d6
+	move.l #pause_menu_func, menu_functions.w
+	lea pause_menu(pc), a5
+	bsr draw_menu
+	bra gamepad_setup
+	
+lock_on:
+	move.l #lock_on_port, rom_load_addr.w
+	bra menu_common
 menu_start:
+	move.l #load_rom_port, rom_load_addr.w
+menu_common:
+	moveq #0, d0
+	;init vertical scroll RAM
+	vdpaccess $0, VDP_VSRAM_WRITE
+	move.w d0, (a0)
+	move.w d0, (a0)
+	
+	;reset arrow position
+	move.w #$0108, sprite_list.w
+	move.w #$0108, (sprite_list + 8).w
+	move.w #$0086, (sprite_list + 6).w
+	move.w #$01AA, (sprite_list + 6 + 8).w
+	
+	;reset selection
+	move.b d0, selected.w
+	
+	;reset special click handler
+	move.l d0, special_click.w
+
+	
 	lea page_pointers.w, a5
 	lea dir_buffer, a6
 	move.l a6, (a5)+
@@ -596,20 +945,23 @@ wait_complete:
 	bne wait_complete
 
 render_page:
-	;clear name tables
-	vdpaccess $8000, VDP_VRAM_WRITE
-	moveq #32, d0
-	swap d0
-	move.b #32, d0
-	move.w #(64*64-1), d1
-ploop:
-	move.l d0, (a0)
-	dbra d1, ploop
+	bsr clear_screen
+	
+	;clear menu state
+	move.b #0, num_menu.w
+	move.w #272, selection_top.w
+	move.w #655, selection_bot.w
+	move.w #$FFF0, selection_mask.w
 
+	;init scroll table
+	vdpaccess $0, VDP_VRAM_WRITE
+	move.w #0, (a0)
+	move.w #4, (a0)
+	
 	move.l #$40860002, d3
 	move.l d3, (a1)
 	move.l d3, base_cmd.w
-
+	
 	move.b #0, more_pages.w
 	lea page_index.w, a3
 	moveq #MAX_DISPLAY-1, d7
@@ -659,7 +1011,59 @@ done_files:
 	;null terminate page_index
 	moveq #0, d0
 	move.l d0, (a3)
+	
+	tst.b mouse_shown
+	beq .no_mouse
+	
+	tst.b more_pages.w
+	beq .no_next_page
+	
+	;draw Next button
+	moveq #30, d0
+	moveq #26, d1
+	moveq #6, d2
+	bsr draw_button
+	
+	;base attribute
+	move.w #$206B, d0
+	;x pos
+	moveq #32, d1
+	;y pos
+	moveq #26, d2
+	lea next_str(pc), a6
+	bsr print_string_fixed
+	
+.no_next_page
 
+	cmp.l #(page_pointers+8), a5
+	beq .no_prev_page
+	
+	;draw Prev button
+	moveq #3, d0
+	moveq #26, d1
+	moveq #6, d2
+	bsr draw_button
+	
+	;base attribute
+	move.w #$206B, d0
+	;x pos
+	moveq #5, d1
+	;y pos
+	moveq #26, d2
+	lea prev_str(pc), a6
+	bsr print_string_fixed
+	
+.no_prev_page
+
+	move.l #0, cursor_show_fun.w
+	
+	bra .done_page_buttons
+.no_mouse
+	move.l #show_prev_next_buttons, cursor_show_fun.w
+.done_page_buttons
+	move.l #handle_prev_next_click, special_click.w
+
+gamepad_setup:
 	;setup gamepads
 	move.b #$40, PAD1_CTRL
 	move.b #$40, PAD2_CTRL
@@ -670,6 +1074,210 @@ done_files:
 wait_forever
 	stop #2500
 	bra wait_forever
+	
+handle_prev_next_click:
+	;make sure we're actually low enough
+	cmp.w #663, d1
+	bls .no_prev_page
+
+
+	tst.b more_pages.w
+	beq .no_next_page
+	
+	cmp.w #373, d0
+	blo .no_next_page
+	
+	cmp.w #419, d0
+	bhi .no_next_page
+	
+	;switch to the next page
+	move.l page_stack.w, a6
+	move.l (-4, a6), a6
+
+	add.w #10, a7
+	bra render_page
+	
+.no_next_page
+	cmp.l #(page_pointers+8), a5
+	beq .no_prev_page
+	
+	cmp.w #157, d0
+	blo .no_prev_page
+	
+	cmp.w #203, d0
+	bhi .no_prev_page
+	
+	;switch to previous page
+	lea (-12, a5), a5
+	move.l (a5)+, a6
+	move.l a5, page_stack.w
+
+	add.w #10, a7
+	bra render_page
+	
+.no_prev_page
+	rts
+	
+show_prev_next_buttons:
+	movem.l d0-d2/a6, -(a7)
+	tst.b more_pages.w
+	beq .no_next_page
+	
+	;draw Next button
+	moveq #30, d0
+	moveq #26, d1
+	moveq #6, d2
+	bsr draw_button
+	
+	;base attribute
+	move.w #$206B, d0
+	;x pos
+	moveq #32, d1
+	;y pos
+	moveq #26, d2
+	lea next_str(pc), a6
+	bsr print_string_fixed
+	
+.no_next_page
+
+	cmp.l #(page_pointers+8), a5
+	beq .no_prev_page
+	
+	;draw Prev button
+	moveq #3, d0
+	moveq #26, d1
+	moveq #6, d2
+	bsr draw_button
+	
+	;base attribute
+	move.w #$206B, d0
+	;x pos
+	moveq #5, d1
+	;y pos
+	moveq #26, d2
+	lea prev_str(pc), a6
+	bsr print_string_fixed
+	
+.no_prev_page
+	move.l #0, cursor_show_fun.w
+	movem.l (a7)+, d0-d2/a6
+	rts
+	
+show_about:
+	bsr clear_screen
+	moveq #1, d7
+	lea about_text(pc), a6
+	;base attribute
+	move.w #$006B, d0
+.loop
+	tst.b (a6)
+	beq .done
+	;x pos
+	moveq #1, d1
+	;y pos
+	move.w d7, d2
+	bsr print_string_fixed
+	addq #1, d7
+	bra .loop
+.done
+	moveq #8, d6
+	move.l #about_menu_func, menu_functions.w
+	lea about_menu(pc), a5
+	bsr draw_menu
+.wait
+	stop #$2500
+	bra .wait
+	
+exit:
+	move.l #1, menu_port+12
+	bra exit
+	
+resume:
+	move.l #2, menu_port+12
+	bra show_pause_menu
+	
+show_save_slots:
+	move.w #(256+26), sprite_list.w
+	move.w #(256+26), (sprite_list+8).w
+	move.w #(128+8), (sprite_list+6).w
+	move.w #(128+320-24), (sprite_list+6+8).w
+	move.w #(256+32), selection_top.w
+	move.b #0, selected.w
+	move.b #0, num_menu.w
+	lea dir_buffer, a6
+	lea menu_port+16, a3
+	move.l a6, (a3)
+.waitdone:
+	tst.w (a3)
+	bne .waitdone
+	bsr clear_screen
+	moveq #0, d0
+	
+	moveq #0, d6
+	moveq #2, d7
+.slotloop
+	tst.b (a6)
+	beq .done
+	addq #1, d6
+	moveq #4, d1
+	move.w d7, d2
+	bsr print_string_fixed
+	addq #2, d7
+	bra .slotloop
+.done
+	lsl.w #4, d7
+	add.w #248, d7
+	move.w d7, selection_bot.w
+	move.b d6, num_slots.w
+	rts
+	
+save_state:
+	move.b #(5*4), port_off.w
+	bsr show_save_slots
+.wait
+	stop #$2500
+	bra .wait
+	
+load_state:
+	move.b #(6*4), port_off.w
+	bsr show_save_slots
+.wait
+	stop #$2500
+	bra .wait
+	
+next_str:
+	dc.b "Next", 0
+prev_str:
+	dc.b "Prev", 0
+	
+about_text:
+	dc.b "BlastEm v0.5.0", 0
+	dc.b "Copyright 2011-2017 Michael Pavone", 0
+	dc.b " ", 0
+	dc.b "BlastEm is a high performance, open", 0
+	dc.b "source (GPLv3) Genesis/Megadrive", 0
+	dc.b "emulator.",0
+	dc.b " ", 0
+	dc.b " ", 0
+	dc.b " ", 0
+	dc.b " ", 0
+	dc.b "       --- Special Thanks ---", 0
+	dc.b " ", 0
+	dc.b "Nemesis: Documentatino and test ROMs", 0
+	dc.b "Charles MacDonald: Documentation", 0
+	dc.b "Eke-Eke: Documentation", 0
+	dc.b "Bart Trzynadlowski: Documentation", 0
+	dc.b "KanedaFR: Hosting the best Sega forum", 0
+	dc.b "Titan: Awesome demos and documentation", 0
+	dc.b "micky: Testing", 0
+	dc.b "Sasha: Testing", 0
+	dc.b "lol-frank: Testing", 0
+	dc.b "Sik: Testing", 0
+	dc.b "Tim Lawrence : Testing", 0
+	dc.b "ComradeOj: Testing", 0
+	dc.b "Vladikcomper: Testing", 0
+	dc.b 0
+	
 
 Newline:
 	dc.b $A, 0
@@ -722,6 +1330,48 @@ print_string:
 	move.w d2, x_pos.w
 	move.l d3, base_cmd.w
 	rts
+	
+;Prints a null-terminated string with a fixed width font
+;a6 - pointer to string
+;a0 - VDP data port
+;d0 - base tile attribute
+;d1 - x col
+;d2 - y col
+;
+print_string_fixed:
+	;multiply x by 2
+	add.w d1, d1
+	;multiply y by 128
+	lsl.w #7, d2
+	add.w d2, d1
+	add.w #$8000, d1
+	move.w d1, d2
+	and.w #$3FFF, d1
+	rol.w #2, d2
+	and.w #3, d2
+	ori.w #(VDP_VRAM_WRITE >> 16), d1
+	swap d1
+	move.w d2, d1
+	move.l d1, (a1)
+.loop
+	moveq #0, d1
+	move.b (a6)+, d1
+	beq .end
+	add.w d0, d1
+	move.w d1, (a0)
+	bra .loop
+.end
+	rts
+	
+;Returns string length in d0
+;a6 - pointer to string
+strlen:
+	moveq #-1, d0
+.loop
+	addq #1, d0
+	tst.b (a6)+
+	bne .loop
+	rts
 
 	align 1
 font:
@@ -736,6 +1386,9 @@ cursorend:
 button:
 	incbin button.tiles
 buttonend:
+fontfixed:
+	incbin font.tiles
+fontfixedend:
 
 widths:
 	dc.b 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 0, 1
@@ -743,5 +1396,43 @@ widths:
 	dc.b 0, 1, 0, 0, 1, 1, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1
 	dc.b 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1
 	dc.b 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1
+	
+main_menu:
+	dc.b "Load ROM", 0
+	dc.b "About", 0
+	dc.b "Exit", 0
+	dc.b 0
+	
+	align 1
+main_menu_func:
+	dc.l menu_start
+	dc.l show_about
+	dc.l exit
+	
+about_menu:
+	dc.b "Return", 0
+	dc.b 0
+	
+	align 1
+about_menu_func:
+	dc.l show_main_menu
+	
+pause_menu:
+	dc.b "Resume", 0
+	dc.b "Load ROM", 0
+	dc.b "Lock On", 0
+	dc.b "Save State", 0
+	dc.b "Load State", 0
+	dc.b "Exit", 0
+	dc.b 0
+	
+	align 1
+pause_menu_func
+	dc.l resume
+	dc.l menu_start
+	dc.l lock_on
+	dc.l save_state
+	dc.l load_state
+	dc.l exit
 
 rom_end:

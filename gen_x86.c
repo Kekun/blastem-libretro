@@ -31,6 +31,7 @@
 #define OP_POP 0x58
 #define OP_MOVSXD 0x63
 #define PRE_SIZE 0x66
+#define OP_IMUL 0x69
 #define OP_JCC 0x70
 #define OP_IMMED_ARITH 0x80
 #define OP_TEST 0x84
@@ -206,7 +207,6 @@ void check_alloc_code(code_info *code, uint32_t inst_size)
 			//new chunk is not contiguous with the current one
 			jmp_nocheck(code, next_code);
 			code->cur = next_code;
-			code->last = next_code + size/sizeof(RESERVE_WORDS);
 		}
 		code->last = next_code + size/sizeof(code_word) - RESERVE_WORDS;
 	}
@@ -530,7 +530,7 @@ void x86_ir(code_info *code, uint8_t opcode, uint8_t op_ex, uint8_t al_opcode, i
 	if (size == SZ_W) {
 		*(out++) = PRE_SIZE;
 	}
-	if (dst == RAX && !sign_extend) {
+	if (dst == RAX && !sign_extend && al_opcode) {
 		if (size != SZ_B) {
 			al_opcode |= BIT_SIZE;
 			if (size == SZ_Q) {
@@ -1146,6 +1146,15 @@ void imul_rdispr(code_info *code, uint8_t src_base, int32_t disp, uint8_t dst, u
 	x86_rrdisp_sizedir(code, OP2_IMUL | (PRE_2BYTE << 8), dst, src_base, disp, size, 0);
 }
 
+void imul_irr(code_info *code, int32_t val, uint8_t src, uint8_t dst, uint8_t size)
+{
+	if (size == SZ_B) {
+		fatal_error("imul immediate only supports 16-bit sizes and up");
+	}
+	
+	x86_ir(code, OP_IMUL, dst, 0, val, src, size);
+}
+
 void not_r(code_info *code, uint8_t dst, uint8_t size)
 {
 	x86_r_size(code, OP_NOT_NEG, OP_EX_NOT, dst, size);
@@ -1296,6 +1305,15 @@ void mov_ir(code_info *code, int64_t val, uint8_t dst, uint8_t size)
 		}
 	}
 	code->cur = out;
+}
+
+uint8_t is_mov_ir(code_ptr inst)
+{
+	while (*inst == PRE_SIZE || *inst == PRE_REX)
+	{
+		inst++;
+	}
+	return (*inst & 0xF8) == OP_MOV_I8R || (*inst & 0xF8) == OP_MOV_IR || (*inst & 0xFE) == OP_MOV_IEA;
 }
 
 void mov_irdisp(code_info *code, int32_t val, uint8_t dst, int32_t disp, uint8_t size)
@@ -1989,9 +2007,10 @@ void call_noalign(code_info *code, code_ptr fun)
 	code->cur = out;
 }
 
-
+volatile int foo;
 void call(code_info *code, code_ptr fun)
 {
+	foo = *fun;
 	code->stack_off += sizeof(void *);
 	int32_t adjust = 0;
 	if (code->stack_off & 0xF) {
@@ -2019,11 +2038,11 @@ void call_raxfallback(code_info *code, code_ptr fun)
 		*(out++) = disp;
 		disp >>= 8;
 		*(out++) = disp;
+		code->cur = out;
 	} else {
 		mov_ir(code, (int64_t)fun, RAX, SZ_PTR);
 		call_r(code, RAX);
 	}
-	code->cur = out;
 }
 
 void call_r(code_info *code, uint8_t dst)
@@ -2052,6 +2071,11 @@ void retn(code_info *code)
 	code_ptr out = code->cur;
 	*(out++) = OP_RETN;
 	code->cur = out;
+}
+
+void rts(code_info *code)
+{
+	retn(code);
 }
 
 void cdq(code_info *code)
@@ -2133,6 +2157,19 @@ void call_args(code_info *code, code_ptr fun, uint32_t num_args, ...)
 	uint32_t adjust = prep_args(code, num_args, args);
 	va_end(args);
 	call_raxfallback(code, fun);
+	if (adjust) {
+		add_ir(code, adjust, RSP, SZ_PTR);
+		code->stack_off -= adjust;
+	}
+}
+
+void call_args_r(code_info *code, uint8_t fun_reg, uint32_t num_args, ...)
+{
+	va_list args;
+	va_start(args, num_args);
+	uint32_t adjust = prep_args(code, num_args, args);
+	va_end(args);
+	call_r(code, fun_reg);
 	if (adjust) {
 		add_ir(code, adjust, RSP, SZ_PTR);
 		code->stack_off -= adjust;

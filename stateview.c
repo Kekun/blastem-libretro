@@ -8,20 +8,23 @@
 #include "vdp.h"
 #include "render.h"
 #include "util.h"
-#include "blastem.h"
+#include "genesis.h"
+#include "config.h"
 
-//not used, but referenced by the renderer since it handles input
-io_port gamepad_1;
-io_port gamepad_2;
-uint8_t reset = 1;
-uint8_t busreq = 0;
-
-//uint16_t ram[RAM_WORDS];
-uint8_t z80_ram[Z80_RAM_BYTES];
 
 uint16_t read_dma_value(uint32_t address)
 {
 	return 0;
+}
+
+m68k_context *m68k_handle_code_write(uint32_t address, m68k_context *context)
+{
+	return NULL;
+}
+
+z80_context *z80_handle_code_write(uint32_t address, z80_context *context)
+{
+	return NULL;
 }
 
 void ym_data_write(ym2612_context * context, uint8_t value)
@@ -36,11 +39,11 @@ void ym_address_write_part2(ym2612_context * context, uint8_t address)
 {
 }
 
-void handle_keydown(int keycode)
+void handle_keydown(int keycode, uint8_t scancode)
 {
 }
 
-void handle_keyup(int keycode)
+void handle_keyup(int keycode, uint8_t scancode)
 {
 }
 
@@ -53,6 +56,26 @@ void handle_joyup(int joystick, int button)
 }
 
 void handle_joy_dpad(int joystick, int dpadnum, uint8_t value)
+{
+}
+
+void handle_joy_axis(int joystick, int axis, int16_t value)
+{
+}
+
+void handle_joy_added(int joystick)
+{
+}
+
+void handle_mousedown(int mouse, int button)
+{
+}
+
+void handle_mouseup(int mouse, int button)
+{
+}
+
+void handle_mouse_moved(int mouse, uint16_t x, uint16_t y, int16_t deltax, int16_t deltay)
 {
 }
 
@@ -90,13 +113,16 @@ int main(int argc, char ** argv)
 	height = height < 240 ? (width/320) * 240 : height;
 
 	vdp_context context;
-	render_init(width, height, "GST State Viewer", 60, 0);
+	render_init(width, height, "GST State Viewer", 0);
 	init_vdp_context(&context, 0);
 	vdp_load_gst(&context, state_file);
 	vdp_run_to_vblank(&context);
 	vdp_print_sprite_table(&context);
 	printf("Display %s\n", (context.regs[REG_MODE_2] & DISPLAY_ENABLE) ? "enabled" : "disabled");
-    render_context(&context);
+	if (!(context.regs[REG_MODE_2] & DISPLAY_ENABLE)) {
+		puts("Forcing display on");
+		vdp_control_port_write(&context, 0x8000 | REG_MODE_2 << 8 | context.regs[REG_MODE_2] | DISPLAY_ENABLE);
+	}
     render_wait_quit(&context);
     return 0;
 }

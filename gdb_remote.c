@@ -168,7 +168,7 @@ void write_byte(m68k_context * context, uint32_t address, uint8_t value)
 		return;
 	}
 	if (address >= 0xA00000 && address < 0xA04000) {
-		z80_ram[address & 0x1FFF] = value;
+		gen->zram[address & 0x1FFF] = value;
 		genesis_context * gen = context->system;
 #ifndef NO_Z80
 		z80_handle_code_write(address & 0x1FFF, gen->z80);
@@ -216,16 +216,16 @@ void gdb_run_command(m68k_context * context, uint32_t pc, char * command)
 			if (inst.op == M68K_BCC && inst.extra.cond != COND_TRUE) {
 				branch_f = after;
 				branch_t = m68k_branch_target(&inst, context->dregs, context->aregs) & 0xFFFFFF;
-				insert_breakpoint(context, branch_t, (uint8_t *)gdb_debug_enter);
+				insert_breakpoint(context, branch_t, gdb_debug_enter);
 			} else if(inst.op == M68K_DBCC && inst.extra.cond != COND_FALSE) {
 				branch_t = after;
 				branch_f = m68k_branch_target(&inst, context->dregs, context->aregs) & 0xFFFFFF;
-				insert_breakpoint(context, branch_f, (uint8_t *)gdb_debug_enter);
+				insert_breakpoint(context, branch_f, gdb_debug_enter);
 			} else {
 				after = m68k_branch_target(&inst, context->dregs, context->aregs) & 0xFFFFFF;
 			}
 		}
-		insert_breakpoint(context, after, (uint8_t *)gdb_debug_enter);
+		insert_breakpoint(context, after, gdb_debug_enter);
 
 		cont = 1;
 		expect_break_response = 1;
@@ -243,7 +243,7 @@ void gdb_run_command(m68k_context * context, uint32_t pc, char * command)
 		uint8_t type = command[1];
 		if (type < '2') {
 			uint32_t address = strtoul(command+3, NULL, 16);
-			insert_breakpoint(context, address, (uint8_t *)gdb_debug_enter);
+			insert_breakpoint(context, address, gdb_debug_enter);
 			bp_def *new_bp = malloc(sizeof(bp_def));
 			new_bp->next = breakpoints;
 			new_bp->address = address;
@@ -378,7 +378,7 @@ void gdb_run_command(m68k_context * context, uint32_t pc, char * command)
 		if (!memcmp("Supported", command+1, strlen("Supported"))) {
 			sprintf(send_buf, "PacketSize=%X", (int)bufsize);
 			gdb_send_command(send_buf);
-		} else if (!memcmp("Attached", command+1, strlen("Supported"))) {
+		} else if (!memcmp("Attached", command+1, strlen("Attached"))) {
 			//not really meaningful for us, but saying we spawned a new process
 			//is probably closest to the truth
 			gdb_send_command("0");
@@ -395,7 +395,12 @@ void gdb_run_command(m68k_context * context, uint32_t pc, char * command)
 			gdb_send_command("");
 		} else if (command[1] == 'C') {
 			//we only support a single thread currently, so send 1
-			gdb_send_command("1");
+			gdb_send_command("QC1");
+		} else if (!strcmp("fThreadInfo", command + 1)) {
+			//we only support a single thread currently, so send 1
+			gdb_send_command("m1");
+		} else if (!strcmp("sThreadInfo", command + 1)) {
+			gdb_send_command("l");
 		} else {
 			goto not_impl;
 		}
@@ -403,6 +408,8 @@ void gdb_run_command(m68k_context * context, uint32_t pc, char * command)
 	case 'v':
 		if (!memcmp("Cont?", command+1, strlen("Cont?"))) {
 			gdb_send_command("vCont;c;C;s;S");
+		} else if (!strcmp("MustReplyEmpty", command + 1)) {
+			gdb_send_command("");
 		} else if (!memcmp("Cont;", command+1, strlen("Cont;"))) {
 			switch (*(command + 1 + strlen("Cont;")))
 			{
@@ -433,16 +440,16 @@ void gdb_run_command(m68k_context * context, uint32_t pc, char * command)
 					if (inst.op == M68K_BCC && inst.extra.cond != COND_TRUE) {
 						branch_f = after;
 						branch_t = m68k_branch_target(&inst, context->dregs, context->aregs) & 0xFFFFFF;
-						insert_breakpoint(context, branch_t, (uint8_t *)gdb_debug_enter);
+						insert_breakpoint(context, branch_t, gdb_debug_enter);
 					} else if(inst.op == M68K_DBCC && inst.extra.cond != COND_FALSE) {
 						branch_t = after;
 						branch_f = m68k_branch_target(&inst, context->dregs, context->aregs) & 0xFFFFFF;
-						insert_breakpoint(context, branch_f, (uint8_t *)gdb_debug_enter);
+						insert_breakpoint(context, branch_f, gdb_debug_enter);
 					} else {
 						after = m68k_branch_target(&inst, context->dregs, context->aregs) & 0xFFFFFF;
 					}
 				}
-				insert_breakpoint(context, after, (uint8_t *)gdb_debug_enter);
+				insert_breakpoint(context, after, gdb_debug_enter);
 
 				cont = 1;
 				expect_break_response = 1;
@@ -467,7 +474,7 @@ not_impl:
 	fatal_error("Command %s is not implemented, exiting...\n", command);
 }
 
-m68k_context *  gdb_debug_enter(m68k_context * context, uint32_t pc)
+void  gdb_debug_enter(m68k_context * context, uint32_t pc)
 {
 	dfprintf(stderr, "Entered debugger at address %X\n", pc);
 	if (expect_break_response) {
@@ -510,7 +517,7 @@ m68k_context *  gdb_debug_enter(m68k_context * context, uint32_t pc)
 				memmove(curbuf, buf, end-curbuf);
 				end -= curbuf - buf;
 			}
-			int numread = read(GDB_IN_FD, end, bufsize - (end-buf));
+			int numread = GDB_READ(GDB_IN_FD, end, bufsize - (end-buf));
 			end += numread;
 			curbuf = buf;
 		}
@@ -549,7 +556,6 @@ m68k_context *  gdb_debug_enter(m68k_context * context, uint32_t pc)
 			curbuf = NULL;
 		}
 	}
-	return context;
 }
 
 #ifdef _WIN32
@@ -570,10 +576,10 @@ void gdb_remote_init(void)
 
 	struct addrinfo request, *result;
 	memset(&request, 0, sizeof(request));
-	request.ai_family = AF_UNSPEC;
+	request.ai_family = AF_INET;
 	request.ai_socktype = SOCK_STREAM;
 	request.ai_flags = AI_PASSIVE;
-	getaddrinfo(NULL, "1234", &request, &result);
+	getaddrinfo("localhost", "1234", &request, &result);
 
 	int listen_sock = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
 	if (listen_sock < 0) {

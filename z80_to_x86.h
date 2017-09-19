@@ -7,12 +7,13 @@
 #define Z80_TO_X86_H_
 #include "z80inst.h"
 #include "backend.h"
+#include "serialize.h"
 
 #define ZNUM_MEM_AREAS 4
 #ifdef Z80_LOG_ADDRESS
 #define ZMAX_NATIVE_SIZE 255
 #else
-#define ZMAX_NATIVE_SIZE 128
+#define ZMAX_NATIVE_SIZE 160
 #endif
 
 enum {
@@ -22,10 +23,12 @@ enum {
 	ZF_H,
 	ZF_Z,
 	ZF_S,
+	ZF_XY,
 	ZF_NUM
 };
 
-typedef void (*z80_run_fun)(void * context);
+typedef struct z80_context z80_context;
+typedef void (*z80_ctx_fun)(z80_context * context);
 
 typedef struct {
 	cpu_options     gen;
@@ -46,10 +49,10 @@ typedef struct {
 
 	uint32_t        flags;
 	int8_t          regs[Z80_UNUSED];
-	z80_run_fun     run;
+	z80_ctx_fun     run;
 } z80_options;
 
-typedef struct {
+struct z80_context {
 	void *            native_pc;
 	uint16_t          sp;
 	uint8_t           flags[ZF_NUM];
@@ -68,30 +71,33 @@ typedef struct {
 	void *            extra_pc;
 	uint32_t          sync_cycle;
 	uint32_t          int_cycle;
-	native_map_slot * static_code_map;
-	native_map_slot * banked_code_map;
 	z80_options *     options;
 	void *            system;
-	uint8_t           ram_code_flags[(8 * 1024)/128/8];
 	uint32_t          int_enable_cycle;
-  uint16_t          pc;
+	uint16_t          pc;
 	uint32_t          int_pulse_start;
 	uint32_t          int_pulse_end;
+	uint32_t          nmi_start;
 	uint8_t           breakpoint_flags[(16 * 1024)/sizeof(uint8_t)];
 	uint8_t *         bp_handler;
 	uint8_t *         bp_stub;
 	uint8_t *         interp_code[256];
+	z80_ctx_fun       next_int_pulse;
 	uint8_t           reset;
 	uint8_t           busreq;
 	uint8_t           busack;
-} z80_context;
+	uint8_t           int_is_nmi;
+	uint8_t           ram_code_flags[];
+};
 
 void translate_z80_stream(z80_context * context, uint32_t address);
-void init_z80_opts(z80_options * options, memmap_chunk const * chunks, uint32_t num_chunks, memmap_chunk const * io_chunks, uint32_t num_io_chunks, uint32_t clock_divider);
-void init_z80_context(z80_context * context, z80_options * options);
+void init_z80_opts(z80_options * options, memmap_chunk const * chunks, uint32_t num_chunks, memmap_chunk const * io_chunks, uint32_t num_io_chunks, uint32_t clock_divider, uint32_t io_address_mask);
+void z80_options_free(z80_options *opts);
+z80_context * init_z80_context(z80_options * options);
 code_ptr z80_get_native_address(z80_context * context, uint32_t address);
 code_ptr z80_get_native_address_trans(z80_context * context, uint32_t address);
 z80_context * z80_handle_code_write(uint32_t address, z80_context * context);
+void z80_invalidate_code_range(z80_context *context, uint32_t start, uint32_t end);
 void z80_reset(z80_context * context);
 void zinsert_breakpoint(z80_context * context, uint16_t address, uint8_t * bp_handler);
 void zremove_breakpoint(z80_context * context, uint16_t address);
@@ -100,10 +106,11 @@ void z80_assert_reset(z80_context * context, uint32_t cycle);
 void z80_clear_reset(z80_context * context, uint32_t cycle);
 void z80_assert_busreq(z80_context * context, uint32_t cycle);
 void z80_clear_busreq(z80_context * context, uint32_t cycle);
+void z80_assert_nmi(z80_context *context, uint32_t cycle);
 uint8_t z80_get_busack(z80_context * context, uint32_t cycle);
 void z80_adjust_cycles(z80_context * context, uint32_t deduction);
-//to be provided by system code
-void z80_next_int_pulse(z80_context * z_context);
+void z80_serialize(z80_context *context, serialize_buffer *buf);
+void z80_deserialize(deserialize_buffer *buf, void *vcontext);
 
 #endif //Z80_TO_X86_H_
 

@@ -8,6 +8,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include "serialize.h"
 
 #define NUM_PART_REGS (0xB7-0x30)
 #define NUM_CHANNELS 6
@@ -27,6 +28,8 @@ typedef struct {
 	uint8_t  detune;
 	uint8_t  am;
 	uint8_t  env_phase;
+	uint8_t  ssg;
+	uint8_t  inverted;
 } ym_operator;
 
 typedef struct {
@@ -42,6 +45,7 @@ typedef struct {
 	uint8_t  ams;
 	uint8_t  pms;
 	uint8_t  lr;
+	uint8_t  keyon;
 } ym_channel;
 
 typedef struct {
@@ -70,12 +74,15 @@ typedef struct {
 	//TODO: Condense the next two fields into one
 	uint32_t    write_cycle;
 	uint32_t    busy_cycles;
+	uint32_t    lowpass_alpha;
 	ym_operator operators[NUM_OPERATORS];
 	ym_channel  channels[NUM_CHANNELS];
 	uint16_t    timer_a;
 	uint16_t    timer_a_load;
 	uint16_t    env_counter;
 	ym_supp     ch3_supp[3];
+	int16_t     last_left;
+	int16_t     last_right;
 	uint8_t     timer_b;
 	uint8_t     sub_timer_b;
 	uint8_t     timer_b_load;
@@ -90,6 +97,7 @@ typedef struct {
 	uint8_t     lfo_counter;
 	uint8_t     lfo_am_step;
 	uint8_t     lfo_pm_step;
+	uint8_t     csm_keyon;
 	uint8_t     status;
 	uint8_t     selected_reg;
 	uint8_t     selected_part;
@@ -113,6 +121,7 @@ enum {
 	REG_DECAY_AM     = 0x60,
 	REG_SUSTAIN_RATE = 0x70,
 	REG_S_LVL_R_RATE = 0x80,
+	REG_SSG_EG       = 0x90,
 
 	REG_FNUM_LOW     = 0xA0,
 	REG_BLOCK_FNUM_H = 0xA4,
@@ -122,7 +131,9 @@ enum {
 	REG_LR_AMS_PMS   = 0xB4
 };
 
-void ym_init(ym2612_context * context, uint32_t sample_rate, uint32_t master_clock, uint32_t clock_div, uint32_t sample_limit, uint32_t options);
+void ym_init(ym2612_context * context, uint32_t sample_rate, uint32_t master_clock, uint32_t clock_div, uint32_t sample_limit, uint32_t options, uint32_t lowpass_cutoff);
+void ym_reset(ym2612_context *context);
+void ym_free(ym2612_context *context);
 void ym_adjust_master_clock(ym2612_context * context, uint32_t master_clock);
 void ym_run(ym2612_context * context, uint32_t to_cycle);
 void ym_address_write_part1(ym2612_context * context, uint8_t address);
@@ -133,6 +144,8 @@ uint8_t ym_load_gst(ym2612_context * context, FILE * gstfile);
 uint8_t ym_save_gst(ym2612_context * context, FILE * gstfile);
 void ym_print_channel_info(ym2612_context *context, int channel);
 void ym_print_timer_info(ym2612_context *context);
+void ym_serialize(ym2612_context *context, serialize_buffer *buf);
+void ym_deserialize(deserialize_buffer *buf, void *vcontext);
 
 #endif //YM2612_H_
 

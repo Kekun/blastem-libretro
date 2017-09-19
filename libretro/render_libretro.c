@@ -401,9 +401,9 @@ static void cpu_thread_wrapper()
    gen.ym = &y_context;
    gen.psg = &p_context;
    genesis = &gen;
-   setup_io_devices(config, gen.ports);
+   setup_io_devices(config, cart, gen.io);
 
-   set_keybindings(gen.ports);
+   set_keybindings(gen.io.ports);
 
    co_switch(main_thread);
 

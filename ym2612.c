@@ -39,7 +39,7 @@
 #define BIT_STATUS_TIMERA 0x1
 #define BIT_STATUS_TIMERB 0x2
 
-uint32_t ym_calc_phase_inc(ym2612_context * context, ym_operator * operator, uint32_t op);
+static uint32_t ym_calc_phase_inc(ym2612_context * context, ym_operator * operator, uint32_t op);
 
 enum {
 	PHASE_ATTACK,
@@ -53,14 +53,14 @@ uint8_t did_tbl_init = 0;
 //memory is cheap so using a half sine table will probably save some cycles
 //a full sine table would be nice, but negative numbers don't get along with log2
 #define SINE_TABLE_SIZE 512
-uint16_t sine_table[SINE_TABLE_SIZE];
+static uint16_t sine_table[SINE_TABLE_SIZE];
 //Similar deal here with the power table for log -> linear conversion
 //According to Nemesis, real hardware only uses a 256 entry table for the fractional part
 //and uses the whole part as a shift amount.
 #define POW_TABLE_SIZE (1 << 13)
-uint16_t pow_table[POW_TABLE_SIZE];
+static uint16_t pow_table[POW_TABLE_SIZE];
 
-uint16_t rate_table_base[] = {
+static uint16_t rate_table_base[] = {
 	//main portion
 	0,1,0,1,0,1,0,1,
 	0,1,0,1,1,1,0,1,
@@ -73,10 +73,10 @@ uint16_t rate_table_base[] = {
 	1,2,2,2,1,2,2,2,
 };
 
-uint16_t rate_table[64*8];
+static uint16_t rate_table[64*8];
 
-uint8_t lfo_timer_values[] = {108, 77, 71, 67, 62, 44, 8, 5};
-uint8_t lfo_pm_base[][8] = {
+static uint8_t lfo_timer_values[] = {108, 77, 71, 67, 62, 44, 8, 5};
+static uint8_t lfo_pm_base[][8] = {
 	{0,   0,   0,   0,   0,   0,   0,   0},
 	{0,   0,   0,   0,   4,   4,   4,   4},
 	{0,   0,   0,   4,   4,   4,   8,   8},
@@ -86,7 +86,7 @@ uint8_t lfo_pm_base[][8] = {
 	{0,   0,0x10,0x18,0x20,0x20,0x28,0x30},
 	{0,   0,0x20,0x30,0x40,0x40,0x50,0x60}
 };
-int16_t lfo_pm_table[128 * 32 * 8];
+static int16_t lfo_pm_table[128 * 32 * 8];
 
 int16_t ams_shift[] = {8, 1, -1, -2};
 
@@ -94,38 +94,78 @@ int16_t ams_shift[] = {8, 1, -1, -2};
 #define YM_DIVIDER 2
 #define CYCLE_NEVER 0xFFFFFFFF
 
-uint16_t round_fixed_point(double value, int dec_bits)
+static uint16_t round_fixed_point(double value, int dec_bits)
 {
 	return value * (1 << dec_bits) + 0.5;
 }
 
-FILE * debug_file = NULL;
-uint32_t first_key_on=0;
+static FILE * debug_file = NULL;
+static uint32_t first_key_on=0;
 
-ym2612_context * log_context = NULL;
+static ym2612_context * log_context = NULL;
 
-void ym_finalize_log()
+static void ym_finalize_log()
 {
+	if (!log_context) {
+		return;
+	}
 	for (int i = 0; i < NUM_CHANNELS; i++) {
 		if (log_context->channels[i].logfile) {
 			wave_finalize(log_context->channels[i].logfile);
 		}
 	}
+	log_context = NULL;
 }
-#define BUFFER_INC_RES 1000000000UL
+#define BUFFER_INC_RES 0x40000000UL
 
 void ym_adjust_master_clock(ym2612_context * context, uint32_t master_clock)
 {
 	uint64_t old_inc = context->buffer_inc;
-	context->buffer_inc = ((BUFFER_INC_RES * (uint64_t)context->sample_rate) / (uint64_t)master_clock) * (uint64_t)context->clock_inc;
+	context->buffer_inc = ((BUFFER_INC_RES * (uint64_t)context->sample_rate) / (uint64_t)master_clock) * (uint64_t)context->clock_inc * NUM_OPERATORS;
 }
 
 #ifdef __ANDROID__
 #define log2(x) (log(x)/log(2))
 #endif
 
-void ym_init(ym2612_context * context, uint32_t sample_rate, uint32_t master_clock, uint32_t clock_div, uint32_t sample_limit, uint32_t options)
+
+#define TIMER_A_MAX 1023
+#define TIMER_B_MAX 255
+
+void ym_reset(ym2612_context *context)
 {
+	memset(context->part1_regs, 0, sizeof(context->part1_regs));
+	memset(context->part2_regs, 0, sizeof(context->part2_regs));
+	memset(context->operators, 0, sizeof(context->operators));
+	memset(context->channels, 0, sizeof(context->channels));
+	memset(context->ch3_supp, 0, sizeof(context->ch3_supp));
+	context->selected_reg = 0;
+	context->csm_keyon = 0;
+	context->ch3_mode = 0;
+	context->dac_enable = 0;
+	context->status = 0;
+	context->timer_a_load = 0;
+	context->timer_b_load = 0;
+	//TODO: Confirm these on hardware
+	context->timer_a = TIMER_A_MAX;
+	context->timer_b = TIMER_B_MAX;
+	
+	//TODO: Reset LFO state
+	
+	//some games seem to expect that the LR flags start out as 1
+	for (int i = 0; i < NUM_CHANNELS; i++) {
+		context->channels[i].lr = 0xC0;
+	}
+	context->write_cycle = CYCLE_NEVER;
+	for (int i = 0; i < NUM_OPERATORS; i++) {
+		context->operators[i].envelope = MAX_ENVELOPE;
+		context->operators[i].env_phase = PHASE_RELEASE;
+	}
+}
+
+void ym_init(ym2612_context * context, uint32_t sample_rate, uint32_t master_clock, uint32_t clock_div, uint32_t sample_limit, uint32_t options, uint32_t lowpass_cutoff)
+{
+	static uint8_t registered_finalize;
 	dfopen(debug_file, "ym_debug.txt", "w");
 	memset(context, 0, sizeof(*context));
 	context->audio_buffer = malloc(sizeof(*context->audio_buffer) * sample_limit*2);
@@ -133,16 +173,16 @@ void ym_init(ym2612_context * context, uint32_t sample_rate, uint32_t master_clo
 	context->sample_rate = sample_rate;
 	context->clock_inc = clock_div * 6;
 	ym_adjust_master_clock(context, master_clock);
+	
+	double rc = (1.0 / (double)lowpass_cutoff) / (2.0 * M_PI);
+	double dt = 1.0 / ((double)master_clock / (double)(context->clock_inc * NUM_OPERATORS));
+	double alpha = dt / (dt + rc);
+	context->lowpass_alpha = (int32_t)(((double)0x10000) * alpha);
 
 	context->sample_limit = sample_limit*2;
-	context->write_cycle = CYCLE_NEVER;
-	for (int i = 0; i < NUM_OPERATORS; i++) {
-		context->operators[i].envelope = MAX_ENVELOPE;
-		context->operators[i].env_phase = PHASE_RELEASE;
-	}
+	
 	//some games seem to expect that the LR flags start out as 1
 	for (int i = 0; i < NUM_CHANNELS; i++) {
-		context->channels[i].lr = 0xC0;
 		if (options & YM_OPT_WAVE_LOG) {
 			char fname[64];
 			sprintf(fname, "ym_channel_%d.wav", i);
@@ -159,7 +199,10 @@ void ym_init(ym2612_context * context, uint32_t sample_rate, uint32_t master_clo
 	}
 	if (options & YM_OPT_WAVE_LOG) {
 		log_context = context;
-		atexit(ym_finalize_log);
+		if (!registered_finalize) {
+			atexit(ym_finalize_log);
+			registered_finalize = 1;
+		}
 	}
 	if (!did_tbl_init) {
 		//populate sine table
@@ -218,14 +261,80 @@ void ym_init(ym2612_context * context, uint32_t sample_rate, uint32_t master_clo
 			}
 		}
 	}
+	ym_reset(context);
+}
+
+void ym_free(ym2612_context *context)
+{
+	if (context == log_context) {
+		ym_finalize_log();
+	}
+	free(context->audio_buffer);
+	//TODO: Figure out how to make this 100% safe
+	//audio thread could still be using this
+	free(context->back_buffer);
+	free(context);
 }
 
 #define YM_VOLUME_MULTIPLIER 2
 #define YM_VOLUME_DIVIDER 3
 #define YM_MOD_SHIFT 1
 
-#define TIMER_A_MAX 1023
-#define TIMER_B_MAX 255
+#define CSM_MODE 0x80
+
+#define SSG_ENABLE    8
+#define SSG_INVERT    4
+#define SSG_ALTERNATE 2
+#define SSG_HOLD      1
+
+#define SSG_CENTER 0x800
+
+static void start_envelope(ym_operator *op, ym_channel *channel)
+{
+	//Deal with "infinite" attack rates
+	uint8_t rate = op->rates[PHASE_ATTACK];
+	if (rate) {
+		uint8_t ks = channel->keycode >> op->key_scaling;;
+		rate = rate*2 + ks;
+	}
+	if (rate >= 62) {
+		op->env_phase = PHASE_DECAY;
+		op->envelope = 0;
+	} else {
+		op->env_phase = PHASE_ATTACK;
+	}
+}
+
+static void keyon(ym_operator *op, ym_channel *channel)
+{
+	start_envelope(op, channel);
+	op->phase_counter = 0;
+	op->inverted = op->ssg & SSG_INVERT;
+}
+
+static const uint8_t keyon_bits[] = {0x10, 0x40, 0x20, 0x80};
+
+static void keyoff(ym_operator *op)
+{
+	op->env_phase = PHASE_RELEASE;
+	if (op->inverted) {
+		//Nemesis says the inversion state doesn't change here, but I don't see how that is observable either way
+		op->inverted = 0;
+		op->envelope = (SSG_CENTER - op->envelope) & MAX_ENVELOPE;
+	}
+}
+
+static void csm_keyoff(ym2612_context *context)
+{
+	context->csm_keyon = 0;
+	uint8_t changes = 0xF0 ^ context->channels[2].keyon;
+	for (uint8_t op = 2*4, bit = 0; op < 3*4; op++, bit++)
+	{
+		if (changes & keyon_bits[bit]) {
+			keyoff(context->operators + op);
+		}
+	}
+}
 
 void ym_run(ym2612_context * context, uint32_t to_cycle)
 {
@@ -237,6 +346,9 @@ void ym_run(ym2612_context * context, uint32_t to_cycle)
 			if (context->timer_control & BIT_TIMERA_ENABLE) {
 				if (context->timer_a != TIMER_A_MAX) {
 					context->timer_a++;
+					if (context->csm_keyon) {
+						csm_keyoff(context);
+					}
 				} else {
 					if (context->timer_control & BIT_TIMERA_LOAD) {
 						context->timer_control &= ~BIT_TIMERA_LOAD;
@@ -244,6 +356,16 @@ void ym_run(ym2612_context * context, uint32_t to_cycle)
 						context->status |= BIT_STATUS_TIMERA;
 					}
 					context->timer_a = context->timer_a_load;
+					if (!context->csm_keyon && context->ch3_mode == CSM_MODE) {
+						context->csm_keyon = 0xF0;
+						uint8_t changes = 0xF0 ^ context->channels[2].keyon;;
+						for (uint8_t op = 2*4, bit = 0; op < 3*4; op++, bit++)
+						{
+							if (changes & keyon_bits[bit]) {
+								keyon(context->operators + op, context->channels + 2);
+							}
+						}
+					}
 				}
 			}
 			if (!context->sub_timer_b) {
@@ -284,22 +406,12 @@ void ym_run(ym2612_context * context, uint32_t to_cycle)
 				//operator->envelope = operator->sustain_level;
 				operator->env_phase = PHASE_SUSTAIN;
 			}
-			for(;;) {
-				rate = operator->rates[operator->env_phase];
-				if (rate) {
-					uint8_t ks = channel->keycode >> operator->key_scaling;;
-					rate = rate*2 + ks;
-					if (rate > 63) {
-						rate = 63;
-					}
-				}
-				//Deal with "infinite" rates
-				//According to Nemesis this should be handled in key-on instead
-				if (rate >= 62 && operator->env_phase == PHASE_ATTACK) {
-					operator->env_phase = PHASE_DECAY;
-					operator->envelope = 0;
-				} else {
-					break;
+			rate = operator->rates[operator->env_phase];
+			if (rate) {
+				uint8_t ks = channel->keycode >> operator->key_scaling;;
+				rate = rate*2 + ks;
+				if (rate > 63) {
+					rate = 63;
 				}
 			}
 			uint32_t cycle_shift = rate < 0x30 ? ((0x2F - rate) >> 2) : 0;
@@ -328,10 +440,20 @@ void ym_run(ym2612_context * context, uint32_t to_cycle)
 						dfprintf(debug_file, "Changing op %d envelope %d by %d in %s phase\n", op, operator->envelope, envelope_inc,
 							operator->env_phase == PHASE_SUSTAIN ? "sustain" : (operator->env_phase == PHASE_DECAY ? "decay": "release"));
 					}
+					if (operator->ssg) {
+						if (operator->envelope < SSG_CENTER) {
+							envelope_inc *= 4;
+						} else {
+							envelope_inc = 0;
+						}
+					}
 					//envelope value is 10-bits, but it will be used as a 4.8 value
 					operator->envelope += envelope_inc << 2;
 					//clamp to max attenuation value
-					if (operator->envelope > MAX_ENVELOPE) {
+					if (
+						operator->envelope > MAX_ENVELOPE 
+						|| (operator->env_phase == PHASE_RELEASE && operator->envelope >= SSG_CENTER)
+					) {
 						operator->envelope = MAX_ENVELOPE;
 					}
 				}
@@ -407,7 +529,31 @@ void ym_run(ym2612_context * context, uint32_t to_cycle)
 				}
 				break;
 			}
-			uint16_t env = operator->envelope + operator->total_level;
+			uint16_t env = operator->envelope;
+			if (operator->ssg) {
+				if (env >= SSG_CENTER) {
+					if (operator->ssg & SSG_ALTERNATE) {
+						if (operator->env_phase != PHASE_RELEASE && (
+							!(operator->ssg & SSG_HOLD) || ((operator->ssg ^ operator->inverted) & SSG_INVERT) == 0
+						)) {
+							operator->inverted ^= SSG_INVERT;
+						}
+					} else if (!(operator->ssg & SSG_HOLD)) {
+						phase = operator->phase_counter = 0;
+					}
+					if (
+						(operator->env_phase == PHASE_DECAY || operator->env_phase == PHASE_SUSTAIN) 
+						&& !(operator->ssg & SSG_HOLD)
+					) {
+						start_envelope(operator, chan);
+						env = operator->envelope;
+					}
+				}
+				if (operator->inverted) {
+					env = (SSG_CENTER - env) & MAX_ENVELOPE;
+				}
+			}
+			env += operator->total_level;
 			if (operator->am) {
 				uint16_t base_am = (context->lfo_am_step & 0x80 ? context->lfo_am_step : ~context->lfo_am_step) & 0x7E;
 				if (ams_shift[chan->ams] >= 0) {
@@ -458,14 +604,11 @@ void ym_run(ym2612_context * context, uint32_t to_cycle)
 			//puts("operator update done");
 		}
 		context->current_op++;
-		context->buffer_fraction += context->buffer_inc;
 		if (context->current_op == NUM_OPERATORS) {
 			context->current_op = 0;
-		}
-		if (context->buffer_fraction > BUFFER_INC_RES) {
-			context->buffer_fraction -= BUFFER_INC_RES;
-			context->audio_buffer[context->buffer_pos] = 0;
-			context->audio_buffer[context->buffer_pos + 1] = 0;
+			
+			context->buffer_fraction += context->buffer_inc;
+			int16_t left = 0, right = 0;
 			for (int i = 0; i < NUM_CHANNELS; i++) {
 				int16_t value = context->channels[i].output;
 				if (value > 0x1FE0) {
@@ -478,23 +621,42 @@ void ym_run(ym2612_context * context, uint32_t to_cycle)
 						value |= 0xC000;
 					}
 				}
-				if (context->channels[i].logfile) {
+				if (context->channels[i].logfile && context->buffer_fraction > BUFFER_INC_RES) {
 					fwrite(&value, sizeof(value), 1, context->channels[i].logfile);
 				}
 				if (context->channels[i].lr & 0x80) {
-					context->audio_buffer[context->buffer_pos] += (value * YM_VOLUME_MULTIPLIER) / YM_VOLUME_DIVIDER;
+					left += (value * YM_VOLUME_MULTIPLIER) / YM_VOLUME_DIVIDER;
 				}
 				if (context->channels[i].lr & 0x40) {
-					context->audio_buffer[context->buffer_pos+1] += (value * YM_VOLUME_MULTIPLIER) / YM_VOLUME_DIVIDER;
+					right += (value * YM_VOLUME_MULTIPLIER) / YM_VOLUME_DIVIDER;
 				}
 			}
-			context->buffer_pos += 2;
-			if (context->buffer_pos == context->sample_limit) {
-				if (!headless) {
-					render_wait_ym(context);
+			int32_t tmp = left * context->lowpass_alpha + context->last_left * (0x10000 - context->lowpass_alpha);
+			left = tmp >> 16;
+			tmp = right * context->lowpass_alpha + context->last_right * (0x10000 - context->lowpass_alpha);
+			right = tmp >> 16;
+			while (context->buffer_fraction > BUFFER_INC_RES) {
+				context->buffer_fraction -= BUFFER_INC_RES;
+
+				int64_t tmp = context->last_left * ((context->buffer_fraction << 16) / context->buffer_inc);
+				tmp += left * (0x10000 - ((context->buffer_fraction << 16) / context->buffer_inc));
+				context->audio_buffer[context->buffer_pos] = tmp >> 16;
+				
+				tmp = context->last_right * ((context->buffer_fraction << 16) / context->buffer_inc);
+				tmp += right * (0x10000 - ((context->buffer_fraction << 16) / context->buffer_inc));
+				context->audio_buffer[context->buffer_pos+1] = tmp >> 16;
+				
+				context->buffer_pos += 2;
+				if (context->buffer_pos == context->sample_limit) {
+					if (!headless) {
+						render_wait_ym(context);
+					}
 				}
 			}
+			context->last_left = left;
+			context->last_right = right;
 		}
+		
 	}
 	if (context->current_cycle >= context->write_cycle + (context->busy_cycles * context->clock_inc / 6)) {
 		context->status &= 0x7F;
@@ -523,7 +685,7 @@ void ym_address_write_part2(ym2612_context * context, uint8_t address)
 	context->status |= 0x80;
 }
 
-uint8_t fnum_to_keycode[] = {
+static uint8_t fnum_to_keycode[] = {
 	//F11 = 0
 	0,0,0,0,0,0,0,1,
 	//F11 = 1
@@ -531,7 +693,7 @@ uint8_t fnum_to_keycode[] = {
 };
 
 //table courtesy of Nemesis
-uint32_t detune_table[][4] = {
+static uint32_t detune_table[][4] = {
 	{0, 0, 1, 2},   //0  (0x00)
     {0, 0, 1, 2},   //1  (0x01)
     {0, 0, 1, 2},   //2  (0x02)
@@ -566,7 +728,7 @@ uint32_t detune_table[][4] = {
     {0, 8,16,22}
 };  //31 (0x1F)
 
-uint32_t ym_calc_phase_inc(ym2612_context * context, ym_operator * operator, uint32_t op)
+static uint32_t ym_calc_phase_inc(ym2612_context * context, ym_operator * operator, uint32_t op)
 {
 	uint32_t chan_num = op / 4;
 	//printf("ym_update_phase_inc | channel: %d, op: %d\n", chan_num, op);
@@ -686,6 +848,9 @@ void ym_data_write(ym2612_context * context, uint8_t value)
 			if (value & BIT_TIMERB_RESET) {
 				context->status &= ~BIT_STATUS_TIMERB;
 			}
+			if (context->ch3_mode == CSM_MODE && (value & 0xC0) != CSM_MODE && context->csm_keyon) {
+				csm_keyoff(context);
+			}
 			context->ch3_mode = value & 0xC0;
 			break;
 		}
@@ -695,19 +860,20 @@ void ym_data_write(ym2612_context * context, uint8_t value)
 				if (channel > 2) {
 					channel--;
 				}
-				uint8_t bits[] = {0x10, 0x40, 0x20, 0x80};
+				uint8_t changes = channel == 2 
+					? (value | context->csm_keyon) ^  (context->channels[channel].keyon | context->csm_keyon)
+					: value ^ context->channels[channel].keyon;
+				context->channels[channel].keyon = value & 0xF0;
 				for (uint8_t op = channel * 4, bit = 0; op < (channel + 1) * 4; op++, bit++) {
-					if (value & bits[bit]) {
-						if (context->operators[op].env_phase == PHASE_RELEASE)
-						{
+					if (changes & keyon_bits[bit]) {
+						if (value & keyon_bits[bit]) {
 							first_key_on = 1;
 							//printf("Key On for operator %d in channel %d\n", op, channel);
-							context->operators[op].phase_counter = 0;
-							context->operators[op].env_phase = PHASE_ATTACK;
+							keyon(context->operators + op, context->channels + channel);
+						} else {
+							//printf("Key Off for operator %d in channel %d\n", op, channel);
+							keyoff(context->operators + op);
 						}
-					} else {
-						//printf("Key Off for operator %d in channel %d\n", op, channel);
-						context->operators[op].env_phase = PHASE_RELEASE;
 					}
 				}
 			}
@@ -759,6 +925,15 @@ void ym_data_write(ym2612_context * context, uint8_t value)
 				if (operator->sustain_level == 0x780) {
 					operator->sustain_level = MAX_ENVELOPE;
 				}
+				break;
+			case REG_SSG_EG:
+				if (!(value & SSG_ENABLE)) {
+					value = 0;
+				}
+				if ((value ^ operator->ssg) & SSG_INVERT) {
+					operator->inverted ^= SSG_INVERT;
+				}
+				operator->ssg = value;
 				break;
 			}
 		}
@@ -883,3 +1058,123 @@ void ym_print_timer_info(ym2612_context *context)
 		   context->timer_control & BIT_TIMERB_ENABLE ? "yes" : "no");
 }
 
+void ym_serialize(ym2612_context *context, serialize_buffer *buf)
+{
+	save_buffer8(buf, context->part1_regs, YM_PART1_REGS);
+	save_buffer8(buf, context->part2_regs, YM_PART2_REGS);
+	for (int i = 0; i < NUM_OPERATORS; i++)
+	{
+		save_int32(buf, context->operators[i].phase_counter);
+		save_int16(buf, context->operators[i].envelope);
+		save_int16(buf, context->operators[i].output);
+		save_int8(buf, context->operators[i].env_phase);
+		save_int8(buf, context->operators[i].inverted);
+	}
+	for (int i = 0; i < NUM_CHANNELS; i++)
+	{
+		save_int16(buf, context->channels[i].output);
+		save_int16(buf, context->channels[i].op1_old);
+		//Due to the latching behavior, these need to be saved
+		//even though duplicate info is probably in the regs array
+		save_int8(buf, context->channels[i].block);
+		save_int16(buf, context->channels[i].fnum);
+		save_int8(buf, context->channels[i].keyon);
+	}
+	for (int i = 0; i < 3; i++)
+	{
+		//Due to the latching behavior, these need to be saved
+		//even though duplicate info is probably in the regs array
+		save_int8(buf, context->ch3_supp[i].block);
+		save_int8(buf, context->ch3_supp[i].fnum);
+	}
+	save_int8(buf, context->timer_control);
+	save_int16(buf, context->timer_a);
+	save_int8(buf, context->timer_b);
+	save_int8(buf, context->sub_timer_b);
+	save_int16(buf, context->env_counter);
+	save_int8(buf, context->current_op);
+	save_int8(buf, context->current_env_op);
+	save_int8(buf, context->lfo_counter);
+	save_int8(buf, context->csm_keyon);
+	save_int8(buf, context->status);
+	save_int8(buf, context->selected_reg);
+	save_int8(buf, context->selected_part);
+	save_int32(buf, context->current_cycle);
+	save_int32(buf, context->write_cycle);
+	save_int32(buf, context->busy_cycles);
+}
+
+void ym_deserialize(deserialize_buffer *buf, void *vcontext)
+{
+	ym2612_context *context = vcontext;
+	uint8_t temp_regs[YM_PART1_REGS];
+	load_buffer8(buf, temp_regs, YM_PART1_REGS);
+	context->selected_part = 0;
+	for (int i = 0; i < YM_PART1_REGS; i++)
+	{
+		uint8_t reg = YM_PART1_START + i;
+		if (reg == REG_TIME_CTRL) {
+			context->ch3_mode = temp_regs[i] & 0xC0;
+		} else if (reg != REG_FNUM_LOW && reg != REG_KEY_ONOFF) {
+			context->selected_reg = reg;
+			ym_data_write(context, temp_regs[i]);
+		}
+	}
+	load_buffer8(buf, temp_regs, YM_PART2_REGS);
+	context->selected_part = 1;
+	for (int i = 0; i < YM_PART2_REGS; i++)
+	{
+		uint8_t reg = YM_PART2_START + i;
+		if (reg != REG_FNUM_LOW) {
+			context->selected_reg = reg;
+			ym_data_write(context, temp_regs[i]);
+		}
+	}
+	for (int i = 0; i < NUM_OPERATORS; i++)
+	{
+		context->operators[i].phase_counter = load_int32(buf);
+		context->operators[i].envelope = load_int16(buf);
+		context->operators[i].output = load_int16(buf);
+		context->operators[i].env_phase = load_int8(buf);
+		if (context->operators[i].env_phase > PHASE_RELEASE) {
+			context->operators[i].env_phase = PHASE_RELEASE;
+		}
+		context->operators[i].inverted = load_int8(buf) != 0 ? SSG_INVERT : 0;
+	}
+	for (int i = 0; i < NUM_CHANNELS; i++)
+	{
+		context->channels[i].output = load_int16(buf);
+		context->channels[i].op1_old = load_int16(buf);
+		context->channels[i].block = load_int8(buf);
+		context->channels[i].fnum = load_int16(buf);
+		context->channels[i].keycode = context->channels[i].block << 2 | fnum_to_keycode[context->channels[i].fnum >> 7];
+		context->channels[i].keyon = load_int8(buf);
+	}
+	for (int i = 0; i < 3; i++)
+	{
+		context->ch3_supp[i].block = load_int8(buf);
+		context->ch3_supp[i].fnum = load_int8(buf);
+		context->ch3_supp[i].keycode = context->ch3_supp[i].block << 2 | fnum_to_keycode[context->ch3_supp[i].fnum >> 7];
+	}
+	context->timer_control = load_int8(buf);
+	context->timer_a = load_int16(buf);
+	context->timer_b = load_int8(buf);
+	context->sub_timer_b = load_int8(buf);
+	context->env_counter = load_int16(buf);
+	context->current_op = load_int8(buf);
+	if (context->current_op >= NUM_OPERATORS) {
+		context->current_op = 0;
+	}
+	context->current_env_op = load_int8(buf);
+	if (context->current_env_op >= NUM_OPERATORS) {
+		context->current_env_op = 0;
+	}
+	context->lfo_counter = load_int8(buf);
+	context->csm_keyon = load_int8(buf);
+	context->status = load_int8(buf);
+	context->selected_reg = load_int8(buf);
+	context->selected_part = load_int8(buf);
+	context->current_cycle = load_int32(buf);
+	context->write_cycle = load_int32(buf);
+	context->busy_cycles = load_int32(buf);
+}

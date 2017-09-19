@@ -1,5 +1,5 @@
 #include "debug.h"
-#include "blastem.h"
+#include "genesis.h"
 #include "68kinst.h"
 #include <stdlib.h>
 #include <string.h>
@@ -88,6 +88,16 @@ void strip_nl(char * buf)
 	}
 }
 
+uint16_t m68k_read_word(uint32_t address, m68k_context *context)
+{
+	return read_word(address, (void **)context->mem_pointers, &context->options->gen, context);
+}
+
+uint32_t m68k_read_long(uint32_t address, m68k_context *context)
+{
+	return m68k_read_word(address, context) << 16 | m68k_read_word(address + 2, context);
+}
+
 void debugger_print(m68k_context *context, char format_char, char *param)
 {
 	uint32_t value;
@@ -108,8 +118,22 @@ void debugger_print(m68k_context *context, char format_char, char *param)
 	}
 	if (param[0] == 'd' && param[1] >= '0' && param[1] <= '7') {
 		value = context->dregs[param[1]-'0'];
+		if (param[2] == '.') {
+			if (param[3] == 'w') {
+				value &= 0xFFFF;
+			} else if (param[3] == 'b') {
+				value &= 0xFF;
+			}
+		}
 	} else if (param[0] == 'a' && param[1] >= '0' && param[1] <= '7') {
 		value = context->aregs[param[1]-'0'];
+		if (param[2] == '.') {
+			if (param[3] == 'w') {
+				value &= 0xFFFF;
+			} else if (param[3] == 'b') {
+				value &= 0xFF;
+			}
+		}
 	} else if (param[0] == 'S' && param[1] == 'R') {
 		value = (context->status << 8);
 		for (int flag = 0; flag < 5; flag++) {
@@ -117,14 +141,24 @@ void debugger_print(m68k_context *context, char format_char, char *param)
 		}
 	} else if(param[0] == 'c') {
 		value = context->current_cycle;
+	} else if(param[0] == 'f') {
+		genesis_context *gen = context->system;
+		value = gen->vdp->frame;
 	} else if ((param[0] == '0' && param[1] == 'x') || param[0] == '$') {
-		uint32_t p_addr = strtol(param+(param[0] == '0' ? 2 : 1), NULL, 16);
-		if ((p_addr & 0xFFFFFF) == 0xC00004) {
-			genesis_context * gen = context->system;
-			value = vdp_hv_counter_read(gen->vdp);
+		char *after;
+		uint32_t p_addr = strtol(param+(param[0] == '0' ? 2 : 1), &after, 16);
+		if (after[0] == '.' && after[1] == 'l') {
+			value = m68k_read_long(p_addr, context);
 		} else {
-			uint16_t *word = get_native_pointer(p_addr & 0xFFFFFE, (void **)context->mem_pointers, &context->options->gen);
-			value = *word;
+			value = m68k_read_word(p_addr, context);
+		}
+	} else if(param[0] == '(' && (param[1] == 'a' || param[1] == 'd') && param[2] >= '0' && param[2] <= '7' && param[3] == ')') {
+		uint8_t reg = param[2] - '0';
+		uint32_t p_addr = param[1] == 'a' ? context->aregs[reg] : context->dregs[reg];
+		if (param[4] == '.' && param[5] == 'l') {
+			value = m68k_read_long(p_addr, context);
+		} else {
+			value = m68k_read_word(p_addr, context);
 		}
 	} else {
 		fprintf(stderr, "Unrecognized parameter to p: %s\n", param);
@@ -140,6 +174,7 @@ void zdebugger_print(z80_context * context, char format_char, char * param)
 	uint32_t value;
 	char format[8];
 	strcpy(format, "%s: %d\n");
+	genesis_context *system = context->system;
 	switch (format_char)
 	{
 	case 'x':
@@ -305,14 +340,14 @@ void zdebugger_print(z80_context * context, char format_char, char * param)
 		if (param[1] == 'x') {
 			uint16_t p_addr = strtol(param+2, NULL, 16);
 			if (p_addr < 0x4000) {
-				value = z80_ram[p_addr & 0x1FFF];
+				value = system->zram[p_addr & 0x1FFF];
 			} else if(p_addr >= 0x8000) {
 				uint32_t v_addr = context->bank_reg << 15;
 				v_addr += p_addr & 0x7FFF;
 				if (v_addr < 0x400000) {
-					value = cart[v_addr/2];
+					value = system->cart[v_addr/2];
 				} else if(v_addr > 0xE00000) {
-					value = ram[(v_addr & 0xFFFF)/2];
+					value = system->work_ram[(v_addr & 0xFFFF)/2];
 				}
 				if (v_addr & 1) {
 					value &= 0xFF;
@@ -333,6 +368,7 @@ z80_context * zdebugger(z80_context * context, uint16_t address)
 	static uint16_t branch_t;
 	static uint16_t branch_f;
 	z80inst inst;
+	genesis_context *system = context->system;
 	init_terminal();
 	//Check if this is a user set breakpoint, or just a temporary one
 	bp_def ** this_bp = find_breakpoint(&zbreakpoints, address);
@@ -341,17 +377,9 @@ z80_context * zdebugger(z80_context * context, uint16_t address)
 	} else {
 		zremove_breakpoint(context, address);
 	}
-	uint8_t * pc;
-	if (address < 0x4000) {
-		pc = z80_ram + (address & 0x1FFF);
-	} else if (address >= 0x8000) {
-		if (context->bank_reg < (0x400000 >> 15)) {
-			fatal_error("Entered Z80 debugger in banked memory address %X, which is not yet supported\n", address);
-		} else {
-			fatal_error("Entered Z80 debugger in banked memory address %X, but the bank is not pointed to a cartridge address\n", address);
-		}
-	} else {
-		fatal_error("Entered Z80 debugger at address %X\n", address);
+	uint8_t * pc = get_native_pointer(address, (void **)context->mem_pointers, &context->options->gen);
+	if (!pc) {
+		fatal_error("Failed to get native pointer on entering Z80 debugger at address %X\n", address);
 	}
 	for (disp_def * cur = zdisplays; cur; cur = cur->next) {
 		zdebugger_print(context, cur->format_char, cur->param);
@@ -468,8 +496,13 @@ z80_context * zdebugger(z80_context * context, uint16_t address)
 				} else if(inst.op == Z80_JR) {
 					after += inst.immed;
 				} else if(inst.op == Z80_RET) {
-					if (context->sp < 0x4000) {
-						after = z80_ram[context->sp & 0x1FFF] | z80_ram[(context->sp+1) & 0x1FFF] << 8;
+					uint8_t *sp = get_native_pointer(context->sp, (void **)context->mem_pointers, &context->options->gen);
+					if (sp) {
+						after = *sp;
+						sp = get_native_pointer((context->sp + 1) & 0xFFFF, (void **)context->mem_pointers, &context->options->gen);
+						if (sp) {
+							after |= *sp << 8;
+						}
 					}
 				}
 				zinsert_breakpoint(context, after, (uint8_t *)zdebugger);
@@ -493,19 +526,43 @@ z80_context * zdebugger(z80_context * context, uint16_t address)
 					fputs("s command requires a file name\n", stderr);
 					break;
 				}
-				FILE * f = fopen(param, "wb");
-				if (f) {
-					if(fwrite(z80_ram, 1, sizeof(z80_ram), f) != sizeof(z80_ram)) {
-						fputs("Error writing file\n", stderr);
+				memmap_chunk const *ram_chunk = NULL;
+				for (int i = 0; i < context->options->gen.memmap_chunks; i++)
+				{
+					memmap_chunk const *cur = context->options->gen.memmap + i;
+					if (cur->flags & MMAP_WRITE) {
+						ram_chunk = cur;
+						break;
 					}
-					fclose(f);
+				}
+				if (ram_chunk) {
+					uint32_t size = ram_chunk->end - ram_chunk->start;
+					if (size > ram_chunk->mask) {
+						size = ram_chunk->mask+1;
+					}
+					uint8_t *buf = get_native_pointer(ram_chunk->start, (void **)context->mem_pointers, &context->options->gen);
+					FILE * f = fopen(param, "wb");
+					if (f) {
+						if(fwrite(buf, 1, size, f) != size) {
+							fputs("Error writing file\n", stderr);
+						}
+						fclose(f);
+						printf("Wrote %d bytes to %s\n", size, param);
+					} else {
+						fprintf(stderr, "Could not open %s for writing\n", param);
+					}
 				} else {
-					fprintf(stderr, "Could not open %s for writing\n", param);
+					fputs("Failed to find a RAM memory chunk\n", stderr);
 				}
 				break;
 			}
 			default:
-				fprintf(stderr, "Unrecognized debugger command %s\n", input_buf);
+				if (
+					!context->options->gen.debug_cmd_handler
+					|| !context->options->gen.debug_cmd_handler(&system->header, input_buf)
+				) {
+					fprintf(stderr, "Unrecognized debugger command %s\n", input_buf);
+				}
 				break;
 		}
 	}
@@ -521,6 +578,7 @@ int run_debugger_command(m68k_context *context, char *input_buf, m68kinst inst, 
 {
 	char * param;
 	char format_char;
+	genesis_context *system = context->system;
 	uint32_t value;
 	bp_def *new_bp, **this_bp;
 	switch(input_buf[0])
@@ -564,6 +622,7 @@ int run_debugger_command(m68k_context *context, char *input_buf, m68kinst inst, 
 				(*target)->commands = commands;
 			} else {
 			}
+			break;
 		case 'b':
 			if (input_buf[1] == 't') {
 				uint32_t stack = context->aregs[7];
@@ -571,16 +630,16 @@ int run_debugger_command(m68k_context *context, char *input_buf, m68kinst inst, 
 					stack &= 0xFFFF;
 					uint8_t non_adr_count = 0;
 					do {
-						uint32_t bt_address = ram[stack/2] << 16 | ram[stack/2+1];
-						bt_address = get_instruction_start(context->native_code_map, bt_address - 2);
+						uint32_t bt_address = system->work_ram[stack/2] << 16 | system->work_ram[stack/2+1];
+						bt_address = get_instruction_start(context->options, bt_address - 2);
 						if (bt_address) {
 							stack += 4;
 							non_adr_count = 0;
 							uint16_t *bt_pc = NULL;
 							if (bt_address < 0x400000) {
-								bt_pc = cart + bt_address/2;
+								bt_pc = system->cart + bt_address/2;
 							} else if(bt_address > 0xE00000) {
-								bt_pc = ram + (bt_address & 0xFFFF)/2;
+								bt_pc = system->work_ram + (bt_address & 0xFFFF)/2;
 							}
 							m68k_decode(bt_pc, &inst, bt_address);
 							m68k_disasm(&inst, input_buf);
@@ -600,7 +659,7 @@ int run_debugger_command(m68k_context *context, char *input_buf, m68kinst inst, 
 					break;
 				}
 				value = strtol(param, NULL, 16);
-				insert_breakpoint(context, value, (uint8_t *)debugger);
+				insert_breakpoint(context, value, debugger);
 				new_bp = malloc(sizeof(bp_def));
 				new_bp->next = breakpoints;
 				new_bp->address = value;
@@ -617,7 +676,7 @@ int run_debugger_command(m68k_context *context, char *input_buf, m68kinst inst, 
 				break;
 			}
 			value = strtol(param, NULL, 16);
-			insert_breakpoint(context, value, (uint8_t *)debugger);
+			insert_breakpoint(context, value, debugger);
 			return 0;
 		case 'd':
 			if (input_buf[1] == 'i') {
@@ -672,14 +731,14 @@ int run_debugger_command(m68k_context *context, char *input_buf, m68kinst inst, 
 			break;
 		case 'n':
 			if (inst.op == M68K_RTS) {
-				after = (read_dma_value(context->aregs[7]/2) << 16) | read_dma_value(context->aregs[7]/2 + 1);
+				after = m68k_read_long(context->aregs[7], context);
 			} else if (inst.op == M68K_RTE || inst.op == M68K_RTR) {
-				after = (read_dma_value((context->aregs[7]+2)/2) << 16) | read_dma_value((context->aregs[7]+2)/2 + 1);
+				after = m68k_read_long(context->aregs[7] + 2, context);
 			} else if(m68k_is_noncall_branch(&inst)) {
 				if (inst.op == M68K_BCC && inst.extra.cond != COND_TRUE) {
 					branch_f = after;
 					branch_t = m68k_branch_target(&inst, context->dregs, context->aregs);
-					insert_breakpoint(context, branch_t, (uint8_t *)debugger);
+					insert_breakpoint(context, branch_t, debugger);
 				} else if(inst.op == M68K_DBCC) {
 					if ( inst.extra.cond == COND_FALSE) {
 						if (context->dregs[inst.dst.params.regs.pri] & 0xFFFF) {
@@ -688,19 +747,19 @@ int run_debugger_command(m68k_context *context, char *input_buf, m68kinst inst, 
 					} else {
 						branch_t = after;
 						branch_f = m68k_branch_target(&inst, context->dregs, context->aregs);
-						insert_breakpoint(context, branch_f, (uint8_t *)debugger);
+						insert_breakpoint(context, branch_f, debugger);
 					}
 				} else {
 					after = m68k_branch_target(&inst, context->dregs, context->aregs);
 				}
 			}
-			insert_breakpoint(context, after, (uint8_t *)debugger);
+			insert_breakpoint(context, after, debugger);
 			return 0;
 		case 'o':
 			if (inst.op == M68K_RTS) {
-				after = (read_dma_value(context->aregs[7]/2) << 16) | read_dma_value(context->aregs[7]/2 + 1);
+				after = m68k_read_long(context->aregs[7], context);
 			} else if (inst.op == M68K_RTE || inst.op == M68K_RTR) {
-				after = (read_dma_value((context->aregs[7]+2)/2) << 16) | read_dma_value((context->aregs[7]+2)/2 + 1);
+				after = m68k_read_long(context->aregs[7] + 2, context);
 			} else if(m68k_is_noncall_branch(&inst)) {
 				if (inst.op == M68K_BCC && inst.extra.cond != COND_TRUE) {
 					branch_t = m68k_branch_target(&inst, context->dregs, context->aregs)  & 0xFFFFFF;
@@ -708,7 +767,7 @@ int run_debugger_command(m68k_context *context, char *input_buf, m68kinst inst, 
 							branch_t = 0;
 					} else {
 						branch_f = after;
-						insert_breakpoint(context, branch_t, (uint8_t *)debugger);
+						insert_breakpoint(context, branch_t, debugger);
 					}
 				} else if(inst.op == M68K_DBCC) {
 					uint32_t target = m68k_branch_target(&inst, context->dregs, context->aregs)  & 0xFFFFFF;
@@ -718,34 +777,40 @@ int run_debugger_command(m68k_context *context, char *input_buf, m68kinst inst, 
 						} else {
 							branch_f = target;
 							branch_t = after;
-							insert_breakpoint(context, branch_f, (uint8_t *)debugger);
+							insert_breakpoint(context, branch_f, debugger);
 						}
 					}
 				} else {
 					after = m68k_branch_target(&inst, context->dregs, context->aregs) & 0xFFFFFF;
 				}
 			}
-			insert_breakpoint(context, after, (uint8_t *)debugger);
+			insert_breakpoint(context, after, debugger);
 			return 0;
 		case 's':
 			if (inst.op == M68K_RTS) {
-				after = (read_dma_value(context->aregs[7]/2) << 16) | read_dma_value(context->aregs[7]/2 + 1);
+				after = m68k_read_long(context->aregs[7], context);
 			} else if (inst.op == M68K_RTE || inst.op == M68K_RTR) {
-				after = (read_dma_value((context->aregs[7]+2)/2) << 16) | read_dma_value((context->aregs[7]+2)/2 + 1);
+				after = m68k_read_long(context->aregs[7] + 2, context);
 			} else if(m68k_is_branch(&inst)) {
 				if (inst.op == M68K_BCC && inst.extra.cond != COND_TRUE) {
 					branch_f = after;
 					branch_t = m68k_branch_target(&inst, context->dregs, context->aregs) & 0xFFFFFF;
-					insert_breakpoint(context, branch_t, (uint8_t *)debugger);
-				} else if(inst.op == M68K_DBCC && inst.extra.cond != COND_FALSE) {
-					branch_t = after;
-					branch_f = m68k_branch_target(&inst, context->dregs, context->aregs) & 0xFFFFFF;
-					insert_breakpoint(context, branch_f, (uint8_t *)debugger);
+					insert_breakpoint(context, branch_t, debugger);
+				} else if(inst.op == M68K_DBCC) {
+					if (inst.extra.cond == COND_FALSE) {
+						if (context->dregs[inst.dst.params.regs.pri] & 0xFFFF) {
+							after = m68k_branch_target(&inst, context->dregs, context->aregs);
+						}
+					} else {
+						branch_t = after;
+						branch_f = m68k_branch_target(&inst, context->dregs, context->aregs);
+						insert_breakpoint(context, branch_f, debugger);
+					}
 				} else {
 					after = m68k_branch_target(&inst, context->dregs, context->aregs) & 0xFFFFFF;
 				}
 			}
-			insert_breakpoint(context, after, (uint8_t *)debugger);
+			insert_breakpoint(context, after, debugger);
 			return 0;
 		case 'v': {
 			genesis_context * gen = context->system;
@@ -826,7 +891,7 @@ int run_debugger_command(m68k_context *context, char *input_buf, m68kinst inst, 
 }
 
 
-m68k_context * debugger(m68k_context * context, uint32_t address)
+void debugger(m68k_context * context, uint32_t address)
 {
 	static char last_cmd[1024];
 	char input_buf[1024];
@@ -851,12 +916,8 @@ m68k_context * debugger(m68k_context * context, uint32_t address)
 		branch_t = branch_f = 0;
 	}
 
-	uint16_t * pc;
-	if (address < 0x400000) {
-		pc = cart + address/2;
-	} else if(address > 0xE00000) {
-		pc = ram + (address & 0xFFFF)/2;
-	} else {
+	uint16_t * pc = get_native_pointer(address, (void **)context->mem_pointers, &context->options->gen);
+	if (!pc) {
 		fatal_error("Entered 68K debugger at address %X\n", address);
 	}
 	uint16_t * after_pc = m68k_decode(pc, &inst, address);
@@ -883,7 +944,7 @@ m68k_context * debugger(m68k_context * context, uint32_t address)
 		if (debugging) {
 			printf("68K Breakpoint %d hit\n", (*this_bp)->index);
 		} else {
-			return context;
+			return;
 		}
 	} else {
 		remove_breakpoint(context, address);
@@ -931,5 +992,5 @@ m68k_context * debugger(m68k_context * context, uint32_t address)
 		}
 		debugging = run_debugger_command(context, input_buf, inst, after);
 	}
-	return context;
+	return;
 }

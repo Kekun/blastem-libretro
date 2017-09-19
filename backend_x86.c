@@ -1,29 +1,83 @@
 #include "backend.h"
 #include "gen_x86.h"
+#include <string.h>
 
 void cycles(cpu_options *opts, uint32_t num)
 {
-	add_ir(&opts->code, num*opts->clock_divider, opts->cycles, SZ_D);
+	if (opts->limit < 0) {
+		sub_ir(&opts->code, num*opts->clock_divider, opts->cycles, SZ_D);
+	} else {
+		add_ir(&opts->code, num*opts->clock_divider, opts->cycles, SZ_D);
+	}
 }
 
 void check_cycles_int(cpu_options *opts, uint32_t address)
 {
 	code_info *code = &opts->code;
-	cmp_rr(code, opts->cycles, opts->limit, SZ_D);
+	uint8_t cc;
+	if (opts->limit < 0) {
+		cmp_ir(code, 1, opts->cycles, SZ_D);
+		cc = CC_NS;
+	} else {
+		cmp_rr(code, opts->cycles, opts->limit, SZ_D);
+		cc = CC_A;
+	}
 	code_ptr jmp_off = code->cur+1;
-	jcc(code, CC_A, jmp_off+1);
+	jcc(code, cc, jmp_off+1);
 	mov_ir(code, address, opts->scratch1, SZ_D);
 	call(code, opts->handle_cycle_limit_int);
 	*jmp_off = code->cur - (jmp_off+1);
 }
 
+void retranslate_calc(cpu_options *opts)
+{
+	code_info *code = &opts->code;
+	code_info tmp = *code;
+	uint8_t cc;
+	if (opts->limit < 0) {
+		cmp_ir(code, 1, opts->cycles, SZ_D);
+		cc = CC_NS;
+	} else {
+		cmp_rr(code, opts->cycles, opts->limit, SZ_D);
+		cc = CC_A;
+	}
+	jcc(code, cc, code->cur+2);
+	opts->move_pc_off = code->cur - tmp.cur;
+	mov_ir(code, 0x1234, opts->scratch1, SZ_D);
+	opts->move_pc_size = code->cur - tmp.cur - opts->move_pc_off;
+	*code = tmp;
+}
+
+void patch_for_retranslate(cpu_options *opts, code_ptr native_address, code_ptr handler)
+{
+	if (!is_mov_ir(native_address)) {
+		//instruction is not already patched for either retranslation or a breakpoint
+		//copy original mov_ir instruction containing PC to beginning of native code area
+		memmove(native_address, native_address + opts->move_pc_off, opts->move_pc_size);
+	}
+	//jump to the retranslation handler
+	code_info tmp = {
+		.cur =  native_address + opts->move_pc_size,
+		.last = native_address + 256,
+		.stack_off = 0
+	};
+	jmp(&tmp, handler);
+}
+
 void check_cycles(cpu_options * opts)
 {
 	code_info *code = &opts->code;
-	cmp_rr(code, opts->cycles, opts->limit, SZ_D);
+	uint8_t cc;
+	if (opts->limit < 0) {
+		cmp_ir(code, 1, opts->cycles, SZ_D);
+		cc = CC_NS;
+	} else {
+		cmp_rr(code, opts->cycles, opts->limit, SZ_D);
+		cc = CC_A;
+	}
 	check_alloc_code(code, MAX_INST_LEN*2);
 	code_ptr jmp_off = code->cur+1;
-	jcc(code, CC_A, jmp_off+1);
+	jcc(code, cc, jmp_off+1);
 	call(code, opts->handle_cycle_limit);
 	*jmp_off = code->cur - (jmp_off+1);
 }
@@ -51,30 +105,43 @@ code_ptr gen_mem_fun(cpu_options * opts, memmap_chunk const * memmap, uint32_t n
 	code_info *code = &opts->code;
 	code_ptr start = code->cur;
 	check_cycles(opts);
+	uint8_t is_write = fun_type == WRITE_16 || fun_type == WRITE_8;
+	uint8_t adr_reg = is_write ? opts->scratch2 : opts->scratch1;
+	uint8_t size =  (fun_type == READ_16 || fun_type == WRITE_16) ? SZ_W : SZ_B;
+	if (size != SZ_B && opts->align_error_mask) {
+		test_ir(code, opts->align_error_mask, adr_reg, SZ_D);
+		jcc(code, CC_NZ, is_write ? opts->handle_align_error_write : opts->handle_align_error_read);
+	}
 	cycles(opts, opts->bus_cycles);
 	if (after_inc) {
 		*after_inc = code->cur;
 	}
-	uint8_t is_write = fun_type == WRITE_16 || fun_type == WRITE_8;
-	uint8_t adr_reg = is_write ? opts->scratch2 : opts->scratch1;
+	
 	if (opts->address_size == SZ_D && opts->address_mask != 0xFFFFFFFF) {
 		and_ir(code, opts->address_mask, adr_reg, SZ_D);
+	} else if (opts->address_size == SZ_W && opts->address_mask != 0xFFFF) {
+		and_ir(code, opts->address_mask, adr_reg, SZ_W);
 	}
 	code_ptr lb_jcc = NULL, ub_jcc = NULL;
 	uint16_t access_flag = is_write ? MMAP_WRITE : MMAP_READ;
-	uint8_t size =  (fun_type == READ_16 || fun_type == WRITE_16) ? SZ_W : SZ_B;
 	uint32_t ram_flags_off = opts->ram_flags_off;
+	uint32_t min_address = 0;
+	uint32_t max_address = opts->max_address;
 	for (uint32_t chunk = 0; chunk < num_chunks; chunk++)
 	{
-		if (memmap[chunk].start > 0) {
+		if (memmap[chunk].start > min_address) {
 			cmp_ir(code, memmap[chunk].start, adr_reg, opts->address_size);
 			lb_jcc = code->cur + 1;
 			jcc(code, CC_C, code->cur + 2);
+		} else {
+			min_address = memmap[chunk].end;
 		}
-		if (memmap[chunk].end < opts->max_address) {
+		if (memmap[chunk].end < max_address) {
 			cmp_ir(code, memmap[chunk].end, adr_reg, opts->address_size);
 			ub_jcc = code->cur + 1;
 			jcc(code, CC_NC, code->cur + 2);
+		} else {
+			max_address = memmap[chunk].start;
 		}
 
 		if (memmap[chunk].mask != opts->address_mask) {
@@ -124,10 +191,15 @@ code_ptr gen_mem_fun(cpu_options * opts, memmap_chunk const * memmap, uint32_t n
 				if (opts->address_size != SZ_D) {
 					movzx_rr(code, adr_reg, adr_reg, opts->address_size, SZ_D);
 				}
+				if (is_write && (memmap[chunk].flags & MMAP_CODE)) {
+					push_r(code, adr_reg);
+				}
 				add_rdispr(code, opts->context_reg, opts->mem_ptr_off + sizeof(void*) * memmap[chunk].ptr_index, adr_reg, SZ_PTR);
 				if (is_write) {
 					mov_rrind(code, opts->scratch1, opts->scratch2, size);
-
+					if (memmap[chunk].flags & MMAP_CODE) {
+						pop_r(code, adr_reg);
+					}
 				} else {
 					mov_rindr(code, opts->scratch1, opts->scratch1, size);
 				}
@@ -195,17 +267,15 @@ code_ptr gen_mem_fun(cpu_options * opts, memmap_chunk const * memmap, uint32_t n
 				mov_rr(code, opts->scratch2, opts->scratch1, opts->address_size);
 				shr_ir(code, opts->ram_flags_shift, opts->scratch1, opts->address_size);
 				bt_rrdisp(code, opts->scratch1, opts->context_reg, ram_flags_off, opts->address_size);
-				if (memmap[chunk].mask == opts->address_mask) {
-					ram_flags_off += (memmap[chunk].end - memmap[chunk].start) / (1 << opts->ram_flags_shift) / 8; ;
-				} else {
-					ram_flags_off += (memmap[chunk].mask + 1) /  (1 << opts->ram_flags_shift) / 8;;
-				}
 				code_ptr not_code = code->cur + 1;
 				jcc(code, CC_NC, code->cur + 2);
+				if (memmap[chunk].mask != opts->address_mask) {
+					or_ir(code, memmap[chunk].start, opts->scratch2, opts->address_size);
+				}
 				call(code, opts->save_context);
 				call_args(code, opts->handle_code_write, 2, opts->scratch2, opts->context_reg);
 				mov_rr(code, RAX, opts->context_reg, SZ_PTR);
-				call(code, opts->load_context);
+				jmp(code, opts->load_context);
 				*not_code = code->cur - (not_code+1);
 			}
 			retn(code);
@@ -227,6 +297,13 @@ code_ptr gen_mem_fun(cpu_options * opts, memmap_chunk const * memmap, uint32_t n
 				mov_ir(code, size == SZ_B ? 0xFF : 0xFFFF, opts->scratch1, size);
 			}
 			retn(code);
+		}
+		if (memmap[chunk].flags & MMAP_CODE) {
+			if (memmap[chunk].mask == opts->address_mask) {
+				ram_flags_off += (memmap[chunk].end - memmap[chunk].start) / (1 << opts->ram_flags_shift) / 8; ;
+			} else {
+				ram_flags_off += (memmap[chunk].mask + 1) /  (1 << opts->ram_flags_shift) / 8;;
+			}
 		}
 		if (lb_jcc) {
 			*lb_jcc = code->cur - (lb_jcc+1);

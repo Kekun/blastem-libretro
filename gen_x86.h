@@ -148,6 +148,7 @@ void sbb_rrdisp(code_info *code, uint8_t src, uint8_t dst_base, int32_t disp, ui
 void sbb_rdispr(code_info *code, uint8_t src_base, int32_t disp, uint8_t dst, uint8_t size);
 void cmp_rrdisp(code_info *code, uint8_t src, uint8_t dst_base, int32_t disp, uint8_t size);
 void cmp_rdispr(code_info *code, uint8_t src_base, int32_t disp, uint8_t dst, uint8_t size);
+void imul_irr(code_info *code, int32_t val, uint8_t src, uint8_t dst, uint8_t size);
 void imul_rr(code_info *code, uint8_t src, uint8_t dst, uint8_t size);
 void imul_rrdisp(code_info *code, uint8_t src, uint8_t dst_base, int32_t disp, uint8_t size);
 void imul_rdispr(code_info *code, uint8_t src_base, int32_t disp, uint8_t dst, uint8_t size);
@@ -215,6 +216,7 @@ void call_r(code_info *code, uint8_t dst);
 void retn(code_info *code);
 void cdq(code_info *code);
 void loop(code_info *code, code_ptr dst);
+uint8_t is_mov_ir(code_ptr inst);
 
 #endif //GEN_X86_H_
 

@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "vgm.h"
 
 #define MCLKS_NTSC 53693175
 #define MCLKS_PAL  53203395
@@ -38,6 +39,14 @@ void handle_joyup(int joystick, int button)
 }
 
 void handle_joy_dpad(int joystick, int dpadnum, uint8_t value)
+{
+}
+
+void handle_joy_axis(int joystick, int axis, int16_t value)
+{
+}
+
+void handle_joy_added(int joystick)
 {
 }
 
@@ -88,18 +97,21 @@ int main(int argc, char ** argv)
 
 	uint32_t fps = 60;
 	config = load_config(argv[0]);
-	render_init(320, 240, "vgm play", 60, 0);
+	render_init(320, 240, "vgm play", 0);
 
 	uint32_t opts = 0;
 	if (argc >= 3 && !strcmp(argv[2], "-y")) {
 		opts |= YM_OPT_WAVE_LOG;
 	}
+	
+	char * lowpass_cutoff_str = tern_find_path(config, "audio\0lowpass_cutoff\0", TVAL_PTR).ptrval;
+	uint32_t lowpass_cutoff = lowpass_cutoff_str ? atoi(lowpass_cutoff_str) : 3390;
 
 	ym2612_context y_context;
-	ym_init(&y_context, render_sample_rate(), MCLKS_NTSC, MCLKS_PER_YM, render_audio_buffer(), opts);
+	ym_init(&y_context, render_sample_rate(), MCLKS_NTSC, MCLKS_PER_YM, render_audio_buffer(), opts, lowpass_cutoff);
 
 	psg_context p_context;
-	psg_init(&p_context, render_sample_rate(), MCLKS_NTSC, MCLKS_PER_PSG, render_audio_buffer());
+	psg_init(&p_context, render_sample_rate(), MCLKS_NTSC, MCLKS_PER_PSG, render_audio_buffer(), lowpass_cutoff);
 
 	FILE * f = fopen(argv[1], "rb");
 	vgm_header header;

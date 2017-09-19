@@ -55,6 +55,7 @@ typedef enum {
 #define MMAP_ONLY_EVEN 0x20
 #define MMAP_FUNC_NULL 0x40
 #define MMAP_BYTESWAP  0x80
+#define MMAP_AUX_BUFF  0x100
 
 typedef uint16_t (*read_16_fun)(uint32_t address, void * context);
 typedef uint8_t (*read_8_fun)(uint32_t address, void * context);
@@ -65,6 +66,7 @@ typedef struct {
 	uint32_t     start;
 	uint32_t     end;
 	uint32_t     mask;
+	uint32_t     aux_mask;
 	uint16_t     ptr_index;
 	uint16_t     flags;
 	void *       buffer;
@@ -73,6 +75,8 @@ typedef struct {
 	read_8_fun   read_8;
 	write_8_fun  write_8;
 } memmap_chunk;
+
+#include "system.h"
 
 typedef struct {
 	uint32_t flags;
@@ -86,21 +90,27 @@ typedef struct {
 	code_ptr           handle_cycle_limit;
 	code_ptr           handle_cycle_limit_int;
 	code_ptr           handle_code_write;
+	code_ptr           handle_align_error_write;
+	code_ptr           handle_align_error_read;
+	system_str_fun_r8  debug_cmd_handler;
 	uint32_t           memmap_chunks;
 	uint32_t           address_mask;
 	uint32_t           max_address;
 	uint32_t           bus_cycles;
 	uint32_t           clock_divider;
+	uint32_t           move_pc_off;
+	uint32_t           move_pc_size;
 	int32_t            mem_ptr_off;
 	int32_t            ram_flags_off;
 	uint8_t            ram_flags_shift;
 	uint8_t            address_size;
 	uint8_t            byte_swap;
-	uint8_t            context_reg;
-	uint8_t            cycles;
-	uint8_t            limit;
-	uint8_t			   scratch1;
-	uint8_t			   scratch2;
+	int8_t             context_reg;
+	int8_t             cycles;
+	int8_t             limit;
+	int8_t             scratch1;
+	int8_t             scratch2;
+	uint8_t            align_error_mask;
 } cpu_options;
 
 typedef uint8_t * (*native_addr_func)(void * context, uint32_t address);
@@ -115,8 +125,13 @@ void check_cycles(cpu_options * opts);
 void check_code_prologue(code_info *code);
 void log_address(cpu_options *opts, uint32_t address, char * format);
 
+void retranslate_calc(cpu_options *opts);
+void patch_for_retranslate(cpu_options *opts, code_ptr native_address, code_ptr handler);
+
 code_ptr gen_mem_fun(cpu_options * opts, memmap_chunk const * memmap, uint32_t num_chunks, ftype fun_type, code_ptr *after_inc);
 void * get_native_pointer(uint32_t address, void ** mem_pointers, cpu_options * opts);
+uint16_t read_word(uint32_t address, void **mem_pointers, cpu_options *opts, void *context);
+memmap_chunk const *find_map_chunk(uint32_t address, cpu_options *opts, uint16_t flags, uint32_t *size_sum);
 uint32_t chunk_size(cpu_options *opts, memmap_chunk const *chunk);
 uint32_t ram_size(cpu_options *opts);
 
